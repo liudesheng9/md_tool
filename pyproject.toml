@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-tools"
+version = "0.2.0"
+description = "Markdown utility commands for splitting files and normalising paragraph spacing"
+requires-python = ">=3.8"
+authors = [{ name = "md_parse user" }]
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+md-tool = "md_tools.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["md_tools", "md_tools.*"]
+

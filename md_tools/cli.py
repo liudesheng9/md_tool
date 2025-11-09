@@ -7,6 +7,8 @@ from typing import List
 from .combine import register_parser as register_combine
 from .format_newlines import register_parser as register_format_newlines
 from .split import register_parser as register_split
+from .translate.text import register_parser as register_translate
+from .translate.translate_md import register_parser as register_translate_md
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     register_split(subparsers)
     register_combine(subparsers)
     register_format_newlines(subparsers)
+    register_translate(subparsers)
+    register_translate_md(subparsers)
 
     return parser
 

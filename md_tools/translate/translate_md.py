@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+import time
+import threading
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Dict, Any
+import json
 
-from ..utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
+from ..utils import detect_newline, normalise_paragraph_newlines
 from .text import TranslationError, translate_text
 
 
@@ -45,6 +49,41 @@ def register_parser(subparsers) -> None:
         default=5,
         help="Number of concurrent translation workers (default: 5).",
     )
+    parser.add_argument(
+        "--delay-min",
+        type=float,
+        default=0,
+        help="Minimum delay in seconds after each translation request (default: 1.0).",
+    )
+    parser.add_argument(
+        "--delay-max",
+        type=float,
+        default=0.1,
+        help="Maximum delay in seconds after each translation request (default: 1.5).",
+    )
+    parser.add_argument(
+        "--bulk-delay-every",
+        type=int,
+        default=10,
+        help="After this many requests, add an extra randomized delay (0 disables bulk delays).",
+    )
+    parser.add_argument(
+        "--bulk-delay-min",
+        type=float,
+        default=0.5,
+        help="Minimum bulk delay in seconds when bulk delays are enabled (default: 2.0).",
+    )
+    parser.add_argument(
+        "--bulk-delay-max",
+        type=float,
+        default=5.0,
+        help="Maximum bulk delay in seconds when bulk delays are enabled (default: 4.0).",
+    )
+    parser.add_argument(
+        "--debug-output",
+        type=Path,
+        help="Optional path to write paragraph detection metadata as JSON.",
+    )
     parser.set_defaults(func=run)
 
 
@@ -69,54 +108,308 @@ def _normalise_paragraph(paragraph: str) -> str:
     return paragraph.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _is_table_line(stripped: str) -> bool:
+    if not stripped:
+        return False
+    if stripped.startswith("|"):
+        return True
+    if stripped.startswith("+-") or stripped.startswith("|-"):
+        return True
+    return all(char in "|:+-=_ " for char in stripped) and "|" in stripped
+
+
+def _is_image_line(line: str) -> bool:
+    stripped = line.lstrip()
+    return stripped.startswith("![") and ("](" in stripped or "] [" in stripped)
+
+
+def _is_reference_definition(stripped: str) -> bool:
+    if not stripped.startswith("["):
+        return False
+    closing = stripped.find("]:")
+    return closing != -1
+
+
+def _is_html_block_start(stripped: str) -> bool:
+    if not stripped.startswith("<") or not stripped.endswith(">"):
+        return False
+    if stripped.startswith("</"):
+        return False
+    return True
+
+
+def _is_html_block_end(stripped: str) -> bool:
+    if stripped.startswith("</") and stripped.endswith(">"):
+        return True
+    if stripped.endswith("/>"):
+        return True
+    if stripped.startswith("<!") and stripped.endswith("-->"):
+        return True
+    return False
+
+
+def _count_equation_delimiters(stripped: str) -> int:
+    return stripped.count("$$")
+
+
+def _is_equation_single_line(stripped: str) -> bool:
+    if "$$" not in stripped:
+        return False
+    if stripped == "$$":
+        return False
+    count = _count_equation_delimiters(stripped)
+    return count >= 2 and stripped.startswith("$$") and stripped.endswith("$$")
+
+
+def _collect_paragraphs(text: str, newline: str) -> Tuple[List[str], List[Dict[str, Any]]]:
+    lines = text.split(newline)
+    paragraphs: List[str] = []
+    metadata: List[Dict[str, Any]] = []
+    buffer: List[str] = []
+    state: Optional[str] = None
+    state_start: Optional[int] = None
+    equation_parity = 0
+    i = 0
+
+    def add_paragraph(kind: str, content_lines: List[str], start_idx: int, end_idx: int) -> None:
+        paragraphs.append(newline.join(content_lines))
+        metadata.append(
+            {
+                "type": kind,
+                "lines": content_lines[:],
+                "line_start": start_idx,
+                "line_end": end_idx,
+            }
+        )
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if state == "equation":
+            buffer.append(line)
+            equation_parity = (equation_parity + _count_equation_delimiters(stripped)) % 2
+            if equation_parity == 0:
+                add_paragraph("equation", buffer, state_start if state_start is not None else i - len(buffer) + 1, i)
+                buffer = []
+                state = None
+                state_start = None
+            i += 1
+            continue
+
+        if state == "html":
+            buffer.append(line)
+            if _is_html_block_end(stripped):
+                add_paragraph("html", buffer, state_start if state_start is not None else i - len(buffer) + 1, i)
+                buffer = []
+                state = None
+                state_start = None
+            i += 1
+            continue
+
+        if state == "table":
+            if _is_table_line(stripped):
+                buffer.append(line)
+                i += 1
+                continue
+            add_paragraph("table", buffer, state_start if state_start is not None else i - len(buffer), i - 1)
+            buffer = []
+            state = None
+            state_start = None
+            continue
+
+        if state == "image":
+            if _is_reference_definition(stripped):
+                buffer.append(line)
+                i += 1
+                continue
+            add_paragraph("image_block", buffer, state_start if state_start is not None else i - len(buffer), i - 1)
+            buffer = []
+            state = None
+            state_start = None
+            continue
+
+        if not stripped:
+            add_paragraph("blank", [line], i, i)
+            i += 1
+            continue
+
+        if _is_image_line(line):
+            buffer = [line]
+            state = "image"
+            state_start = i
+            i += 1
+            continue
+
+        delimiter_count = _count_equation_delimiters(stripped)
+        if delimiter_count:
+            if _is_equation_single_line(stripped):
+                add_paragraph("equation_single", [line], i, i)
+                i += 1
+                continue
+
+            buffer = [line]
+            state = "equation"
+            state_start = i
+            equation_parity = delimiter_count % 2
+            if equation_parity == 0:
+                add_paragraph("equation_single", buffer, state_start, i)
+                buffer = []
+                state = None
+                state_start = None
+            i += 1
+            continue
+
+        if _is_html_block_start(stripped):
+            if "</" in stripped and stripped.count("<") == stripped.count("</") + 1:
+                add_paragraph("html_single", [line], i, i)
+            elif "</" in stripped and stripped.count("</") >= 1 and stripped.count("<") > 1:
+                add_paragraph("html_single", [line], i, i)
+            else:
+                buffer = [line]
+                state = "html"
+                state_start = i
+                if _is_html_block_end(stripped):
+                    add_paragraph("html_single", buffer, state_start, i)
+                    buffer = []
+                    state = None
+                    state_start = None
+            i += 1
+            continue
+
+        if _is_table_line(stripped):
+            buffer = [line]
+            state = "table"
+            state_start = i
+            i += 1
+            continue
+
+        if _is_reference_definition(stripped):
+            add_paragraph("reference", [line], i, i)
+            i += 1
+            continue
+
+        add_paragraph("text", [line], i, i)
+        i += 1
+
+    if state and buffer:
+        add_paragraph(state, buffer, state_start if state_start is not None else len(lines) - len(buffer), len(lines) - 1)
+
+    return paragraphs, metadata
+
+
+class RequestDelayer:
+    def __init__(
+        self,
+        min_delay: float,
+        max_delay: float,
+        bulk_every: int = 0,
+        bulk_min_delay: float = 0.0,
+        bulk_max_delay: float = 0.0,
+    ) -> None:
+        if min_delay < 0 or max_delay < 0:
+            raise ValueError("Delay values must be non-negative.")
+        if max_delay < min_delay:
+            raise ValueError("Maximum delay must be greater than or equal to minimum delay.")
+        if bulk_every < 0:
+            raise ValueError("Bulk delay frequency must be zero or positive.")
+        if bulk_min_delay < 0 or bulk_max_delay < 0:
+            raise ValueError("Bulk delay values must be non-negative.")
+        if bulk_max_delay < bulk_min_delay:
+            raise ValueError("Bulk maximum delay must be greater than or equal to minimum delay.")
+
+        self._min_delay = min_delay
+        self._max_delay = max_delay
+        self._bulk_every = bulk_every
+        self._bulk_min_delay = bulk_min_delay
+        self._bulk_max_delay = bulk_max_delay
+        self._lock = threading.Lock()
+        self._counter = 0
+
+    @staticmethod
+    def _sleep_random(min_delay: float, max_delay: float) -> None:
+        if max_delay == 0 and min_delay == 0:
+            return
+        delay = random.uniform(min_delay, max_delay)
+        if delay > 0:
+            time.sleep(delay)
+
+    def pause(self) -> None:
+        with self._lock:
+            self._counter += 1
+            request_count = self._counter
+
+        self._sleep_random(self._min_delay, self._max_delay)
+
+        if self._bulk_every and request_count % self._bulk_every == 0:
+            self._sleep_random(self._bulk_min_delay, self._bulk_max_delay)
+
+
+class StructureDetector:
+    def __init__(self) -> None:
+        self._equation_open = False
+        self._html_open = False
+        self._in_table = False
+
+    def should_translate(self, line: str) -> bool:
+        stripped = line.strip()
+
+        if self._equation_open:
+            if _count_equation_delimiters(stripped) % 2 == 1:
+                self._equation_open = False
+            return False
+
+        if self._html_open:
+            if _is_html_block_end(stripped):
+                self._html_open = False
+            return False
+
+        if self._in_table:
+            if _is_table_line(stripped):
+                return False
+            self._in_table = False
+
+        if not stripped:
+            return True
+
+        delimiter_count = _count_equation_delimiters(stripped)
+        if delimiter_count:
+            if _is_equation_single_line(stripped):
+                return False
+            if delimiter_count % 2 == 1:
+                self._equation_open = True
+            return False
+
+        if _is_html_block_start(stripped):
+            if not _is_html_block_end(stripped):
+                self._html_open = True
+            return False
+
+        if _is_table_line(stripped):
+            self._in_table = True
+            return False
+
+        if _is_image_line(line):
+            return False
+
+        if _is_reference_definition(stripped):
+            return False
+
+        return True
+
+
 def _segment_paragraph(paragraph: str) -> List[Tuple[List[str], bool]]:
     lines = paragraph.splitlines()
     if not lines:
         return [([], True)]
 
+    detector = StructureDetector()
     segments: List[Tuple[List[str], bool]] = []
     current_lines: List[str] = []
     current_translate = True
-    in_equation = False
-    in_html = False
-
-    def classification_for_line(line: str) -> bool:
-        nonlocal in_equation, in_html
-        stripped = line.strip()
-
-        if in_equation:
-            if stripped.endswith("$$"):
-                in_equation = False
-            return False
-
-        if in_html:
-            if stripped.startswith("</") and stripped.endswith(">"):
-                in_html = False
-            return False
-
-        if not stripped:
-            return True
-
-        if stripped.startswith("$$"):
-            if stripped == "$$" or not stripped.endswith("$$"):
-                in_equation = True
-            return False
-
-        if stripped.startswith("<"):
-            if not stripped.startswith("</") and not stripped.endswith("/>") and "</" not in stripped:
-                in_html = True
-            return False
-
-        if stripped.startswith("|") or stripped.startswith("+-"):
-            return False
-
-        if "![" in line and "](" in line:
-            return False
-
-        return True
 
     for line in lines:
-        should_translate = classification_for_line(line)
+        should_translate = detector.should_translate(line)
 
         if not current_lines:
             current_lines = [line]
@@ -141,24 +434,37 @@ def _translate_paragraph(
     source_language: str,
     target_language: str,
     timeout: float,
+    delayer: RequestDelayer,
 ) -> str:
     segments = _segment_paragraph(paragraph)
 
-    translated_parts: List[str] = []
+    output_lines: List[str] = []
+    translated_any = False
     for lines, should_translate in segments:
-        block = "\n".join(lines)
-        if should_translate and block.strip():
-            translated = translate_text(
-                text=_normalise_paragraph(block),
-                target_language=target_language,
-                source_language=source_language,
-                timeout=timeout,
-            )
-            translated_parts.append(translated)
+        if should_translate:
+            block = "\n".join(lines)
+            normalised = _normalise_paragraph(block)
+            if normalised.strip():
+                translated = translate_text(
+                    text=normalised,
+                    target_language=target_language,
+                    source_language=source_language,
+                    timeout=timeout,
+                )
+                translated_lines = translated.splitlines()
+                if translated_lines:
+                    output_lines.extend(translated_lines)
+                elif translated:
+                    output_lines.append(translated)
+                translated_any = translated_any or bool(translated.strip())
+                delayer.pause()
         else:
-            translated_parts.append(block)
+            output_lines.extend(lines)
 
-    return "\n".join(translated_parts)
+    if not translated_any:
+        return ""
+
+    return "\n".join(output_lines)
 
 
 def translate_markdown_async(
@@ -168,12 +474,14 @@ def translate_markdown_async(
     timeout: float,
     max_workers: int = 5,
     progress_callback: Optional[Callable[[int], None]] = None,
+    delayer: Optional[RequestDelayer] = None,
 ) -> List[str]:
     if max_workers < 1:
         raise ValueError("Worker count must be at least 1.")
 
     total = len(paragraphs)
     translated: List[Optional[str]] = [None] * total
+    active_delayer = delayer or RequestDelayer(0.0, 0.0)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -183,6 +491,7 @@ def translate_markdown_async(
                 source_language,
                 target_language,
                 timeout,
+                active_delayer,
             ): index
             for index, paragraph in enumerate(paragraphs)
         }
@@ -210,14 +519,25 @@ def run(args) -> int:
         return 1
 
     text = args.input.read_text(encoding="utf-8")
-    paragraphs = collect_paragraphs(text)
+    newline = detect_newline(text)
+    paragraphs, paragraph_metadata = _collect_paragraphs(text, newline)
 
-    if not paragraphs:
-        sys.stderr.write("The input file does not contain any paragraphs.\n")
+    if not any(paragraph.strip() for paragraph in paragraphs):
+        sys.stderr.write("The input file does not contain any content.\n")
         return 1
 
-    newline = detect_newline(text)
     progress = ProgressPrinter(len(paragraphs))
+    try:
+        delayer = RequestDelayer(
+            args.delay_min,
+            args.delay_max,
+            bulk_every=args.bulk_delay_every,
+            bulk_min_delay=args.bulk_delay_min,
+            bulk_max_delay=args.bulk_delay_max,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
 
     try:
         translated = translate_markdown_async(
@@ -227,6 +547,7 @@ def run(args) -> int:
             timeout=args.timeout,
             max_workers=args.workers,
             progress_callback=progress.update,
+            delayer=delayer,
         )
     except (ValueError, TranslationError) as exc:
         sys.stderr.write(f"{exc}\n")
@@ -237,16 +558,49 @@ def run(args) -> int:
     finally:
         progress.finish()
 
+    debug_records: List[Dict[str, Any]] = []
     bilingual_paragraphs: List[str] = []
-    for original, translation in zip(paragraphs, translated):
-        bilingual_block = f"{_normalise_paragraph(original)}\n\n{translation}"
+    for index, (original, translation) in enumerate(zip(paragraphs, translated)):
+        original_block = _normalise_paragraph(original)
+        translated_clean = translation.strip()
+
+        if index < len(paragraph_metadata):
+            record = dict(paragraph_metadata[index])
+        else:
+            record = {"type": "unknown", "lines": [original], "line_start": index, "line_end": index}
+
+        record.update(
+            {
+                "index": index,
+                "original": original,
+                "translation": translation,
+                "translated": bool(translated_clean),
+            }
+        )
+        debug_records.append(record)
+
+        if translated_clean:
+            bilingual_block = f"{original_block}\n\n{translation}"
+        else:
+            bilingual_block = original_block
         bilingual_paragraphs.append(bilingual_block)
 
     normalised = normalise_paragraph_newlines(bilingual_paragraphs, newline)
-    separator = newline * 2
-    result = separator.join(normalised)
-    if result and not result.endswith(newline):
+    result = newline.join(normalised)
+    if text.endswith(newline):
         result += newline
+
+    if args.debug_output:
+        debug_payload = {
+            "source": str(args.input),
+            "target": str(args.output) if args.output else None,
+            "paragraphs": debug_records,
+        }
+        try:
+            args.debug_output.parent.mkdir(parents=True, exist_ok=True)
+            args.debug_output.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            sys.stderr.write(f"Failed to write debug output: {exc}\n")
 
     if args.output:
         args.output.write_text(result, encoding="utf-8")

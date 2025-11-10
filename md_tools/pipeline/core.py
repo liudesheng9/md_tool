@@ -6,6 +6,8 @@ from typing import Callable, List, Sequence
 
 from .types import MarkdownArtifact, PipelineStageError
 
+AUTO_OUTPUT_STAGES = {"split", "format-newlines"}
+
 
 def _split_stages(tokens: Sequence[str]) -> List[List[str]]:
     stages: List[List[str]] = []
@@ -68,6 +70,17 @@ def run_pipeline(
         args = _parse_stage(parser_factory, tokens)
         parsed_stages.append((tokens, args))
 
+    if parsed_stages:
+        last_tokens, last_args = parsed_stages[-1]
+        last_stage_name = getattr(last_args, "command", last_tokens[0] if last_tokens else "<unknown>")
+        if last_stage_name in AUTO_OUTPUT_STAGES:
+            output_value = getattr(last_args, "output", None)
+            if not output_value:
+                raise PipelineStageError(
+                    f"The final stage '{last_stage_name}' requires -o/--output to be provided.",
+                    stage=last_stage_name,
+                )
+
     artifact: MarkdownArtifact | None = None
     for index, (tokens, args) in enumerate(parsed_stages, start=1):
         stage_name = getattr(args, "command", tokens[0] if tokens else "<unknown>")
@@ -122,4 +135,3 @@ def render_artifact(artifact: MarkdownArtifact, stream = sys.stdout) -> None:
         stream.write(document.text)
         if not document.text.endswith(("\n", "\r")):
             stream.write("\n")
-

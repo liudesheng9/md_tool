@@ -27,13 +27,20 @@ class SplitTool(MDTool):
         parser.add_argument(
             "-o",
             "--output",
-            action="store_true",
-            help="When used in a pipeline, also write split parts to disk next to the input file.",
+            type=Path,
+            help=(
+                "Output file base name for generated parts (required). "
+                "Pass the same path as the input to keep the existing location."
+            ),
         )
 
     def run(self, args) -> int:
         if args.parts < 1:
             sys.stderr.write("The number of parts must be at least 1.\n")
+            return 1
+
+        if args.output is None:
+            sys.stderr.write("The split command requires -o/--output to specify a file base name.\n")
             return 1
 
         if args.input is None:
@@ -60,12 +67,21 @@ class SplitTool(MDTool):
 
         newline = detect_newline(text)
         grouped = self.split_paragraphs(paragraphs, args.parts)
-        self.write_parts(grouped, args.input, newline)
+        written_paths = self.write_parts(
+            grouped,
+            newline,
+            source_path=args.input,
+            output_base=args.output,
+        )
+
+        base_reference: Path = args.output
+        directory = base_reference.parent if base_reference.parent != Path("") else Path(".")
+        prefix = f"{base_reference.stem}_part_"
 
         print(f"Paragraphs found: {paragraph_count}")
         print(
-            f"Wrote {args.parts} file(s) to {args.input.parent} "
-            f"using prefix {args.input.stem}_part_"
+            f"Wrote {len(written_paths)} file(s) to {directory} "
+            f"using prefix {prefix}"
         )
 
         return 0
@@ -117,11 +133,24 @@ class SplitTool(MDTool):
 
         return result
 
-    def write_parts(self, parts: List[List[str]], source_path: Path, newline: str) -> None:
-        directory = source_path.parent
-        suffix = source_path.suffix or ".md"
-        stem = source_path.stem
+    def write_parts(
+        self,
+        parts: List[List[str]],
+        newline: str,
+        *,
+        source_path: Path | None = None,
+        output_base: Path | None = None,
+    ) -> List[Path]:
+        base_path = Path(output_base) if output_base else source_path
+        if base_path is None:
+            raise ValueError("An output base path is required to write split parts.")
+
+        directory = base_path.parent if base_path.parent != Path("") else Path(".")
+        directory.mkdir(parents=True, exist_ok=True)
+        suffix = base_path.suffix or ".md"
+        stem = base_path.stem or "part"
         separator = newline * 2
+        written_paths: List[Path] = []
 
         for idx, paragraphs in enumerate(parts, start=1):
             normalised = normalise_paragraph_newlines(paragraphs, newline)
@@ -131,6 +160,9 @@ class SplitTool(MDTool):
 
             target_path = directory / f"{stem}_part_{idx}{suffix}"
             target_path.write_text(content, encoding="utf-8")
+            written_paths.append(target_path)
+
+        return written_paths
 
 
 tool = SplitTool()

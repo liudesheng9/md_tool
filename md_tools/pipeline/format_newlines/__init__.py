@@ -59,7 +59,7 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
     if args.output:
         if len(result_documents) != 1:
             raise PipelineStageError(
-                "--output can only be used when the stage produces a single document.",
+                "-o/--output can only be used when the stage produces a single document.",
                 stage=stage_name,
             )
         try:
@@ -67,6 +67,7 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
             original_text = documents[0].text
             if formatted_text == original_text:
                 print("Paragraph spacing already normalised.")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(formatted_text, encoding="utf-8")
         except OSError as exc:
             raise PipelineStageError(

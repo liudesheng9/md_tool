@@ -86,6 +86,24 @@ class TranslateMarkdownTool(MDTool):
             help="Maximum bulk delay in seconds when bulk delays are enabled (default: 4.0).",
         )
         parser.add_argument(
+            "--retry-count",
+            type=int,
+            default=3,
+            help="Number of times to retry a failed translation request (default: 3).",
+        )
+        parser.add_argument(
+            "--retry-delay-min",
+            type=float,
+            default=2.0,
+            help="Minimum delay in seconds before retrying a failed request (default: 2.0).",
+        )
+        parser.add_argument(
+            "--retry-delay-max",
+            type=float,
+            default=5.0,
+            help="Maximum delay in seconds before retrying a failed request (default: 5.0).",
+        )
+        parser.add_argument(
             "--debug-output",
             type=Path,
             help="Optional path to write paragraph detection metadata as JSON.",
@@ -147,6 +165,9 @@ class TranslateMarkdownTool(MDTool):
             bulk_delay_every=args.bulk_delay_every,
             bulk_delay_min=args.bulk_delay_min,
             bulk_delay_max=args.bulk_delay_max,
+            retry_count=args.retry_count,
+            retry_delay_min=args.retry_delay_min,
+            retry_delay_max=args.retry_delay_max,
             enable_progress=enable_progress,
         )
 
@@ -503,12 +524,56 @@ def _segment_paragraph(paragraph: str) -> List[Tuple[List[str], bool]]:
     return segments
 
 
+def _sleep_between_retries(min_delay: float, max_delay: float) -> None:
+    if min_delay <= 0 and max_delay <= 0:
+        return
+    lower = max(0.0, min_delay)
+    upper = max(lower, max_delay)
+    delay = random.uniform(lower, upper) if upper > lower else upper
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _translate_with_retry(
+    text: str,
+    *,
+    source_language: str,
+    target_language: str,
+    timeout: float,
+    max_retries: int,
+    retry_delay_min: float,
+    retry_delay_max: float,
+) -> str:
+    attempts = max(0, max_retries) + 1
+    for attempt_index in range(attempts):
+        try:
+            return translate_text(
+                text=text,
+                target_language=target_language,
+                source_language=source_language,
+                timeout=timeout,
+            )
+        except TranslationError as exc:
+            if attempt_index == attempts - 1:
+                raise
+            retry_number = attempt_index + 1
+            total_retries = max(1, max_retries)
+            sys.stderr.write(
+                f"\n[translate-md] Translation failed ({exc}); retry {retry_number}/{total_retries} after backoff.\n"
+            )
+            sys.stderr.flush()
+            _sleep_between_retries(retry_delay_min, retry_delay_max)
+
+
 def _translate_paragraph(
     paragraph: str,
     source_language: str,
     target_language: str,
     timeout: float,
     delayer: RequestDelayer,
+    max_retries: int,
+    retry_delay_min: float,
+    retry_delay_max: float,
 ) -> str:
     segments = _segment_paragraph(paragraph)
 
@@ -519,11 +584,14 @@ def _translate_paragraph(
             block = "\n".join(lines)
             normalised = _normalise_paragraph(block)
             if normalised.strip():
-                translated = translate_text(
-                    text=normalised,
-                    target_language=target_language,
+                translated = _translate_with_retry(
+                    normalised,
                     source_language=source_language,
+                    target_language=target_language,
                     timeout=timeout,
+                    max_retries=max_retries,
+                    retry_delay_min=retry_delay_min,
+                    retry_delay_max=retry_delay_max,
                 )
                 translated_lines = translated.splitlines()
                 if translated_lines:
@@ -549,6 +617,9 @@ def translate_markdown_async(
     max_workers: int = 5,
     progress_callback: Optional[Callable[[int], None]] = None,
     delayer: Optional[RequestDelayer] = None,
+    max_retries: int = 0,
+    retry_delay_min: float = 0.0,
+    retry_delay_max: float = 0.0,
 ) -> List[str]:
     if max_workers < 1:
         raise ValueError("Worker count must be at least 1.")
@@ -566,6 +637,9 @@ def translate_markdown_async(
                 target_language,
                 timeout,
                 active_delayer,
+                max_retries,
+                retry_delay_min,
+                retry_delay_max,
             ): index
             for index, paragraph in enumerate(paragraphs)
         }
@@ -650,6 +724,9 @@ def translate_markdown_document(
     bulk_delay_every: int,
     bulk_delay_min: float,
     bulk_delay_max: float,
+    retry_count: int,
+    retry_delay_min: float,
+    retry_delay_max: float,
     enable_progress: bool = True,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     newline = detect_newline(text)
@@ -657,6 +734,11 @@ def translate_markdown_document(
 
     if not any(paragraph.strip() for paragraph in paragraphs):
         raise ValueError("The document does not contain any content.")
+
+    if retry_count < 0:
+        raise ValueError("Retry count must be zero or greater.")
+    retry_delay_min = max(0.0, retry_delay_min)
+    retry_delay_max = max(retry_delay_min, retry_delay_max)
 
     progress = ProgressPrinter(len(paragraphs)) if enable_progress else None
     try:
@@ -681,6 +763,9 @@ def translate_markdown_document(
             max_workers=workers,
             progress_callback=progress.update if progress else None,
             delayer=delayer,
+            max_retries=retry_count,
+            retry_delay_min=retry_delay_min,
+            retry_delay_max=retry_delay_max,
         )
     finally:
         if progress:
@@ -698,5 +783,3 @@ def translate_markdown_document(
         result += newline
 
     return result, debug_records
-
-

@@ -26,21 +26,23 @@ py -m pip install -e .
 - Each stage reuses the same in-memory Markdown, eliminating temporary files unless `-o/--output` is used.
 - Stage execution is logged to `stderr`, and progress indicators (e.g. from `translate-md`) remain visible.
 - A pipeline-level `-o/--output` writes the final artifact; otherwise output is rendered to `stdout` unless `--no-output` is provided.
-- Stage-level `-o/--output` flags write files for that stage only (and suppress rendering of that stage’s result).
+- Stage-level `-o/--output <path>` writes files for that stage only (and suppresses rendering of that stage’s result). The `split` and `format-newlines` commands always require this flag in standalone mode; pass the input path again if you want an in-place update. Inside pipelines it’s only mandatory when that command is the final stage, and the parser enforces this before any work runs.
 
 ## Usage Examples
 
 Split a Markdown document into three balanced parts and write each part next to the original file:
 
 ```powershell
-md-tool split path\to\file.md 3
+md-tool split path\to\file.md 3 -o path\to\parts.md
 ```
+Outputs `path\to\parts_part_1.md`, `path\to\parts_part_2.md`, etc.
 
 Normalise paragraph spacing in-place:
 
 ```powershell
-md-tool format-newlines path\to\file.md
+md-tool format-newlines path\to\file.md -o path\to\file.cleaned.md
 ```
+Use `-o path\to\file.md` to update the original file in place.
 
 Combine multiple sources into a single result:
 
@@ -56,10 +58,10 @@ Translate to French, tidy paragraph spacing, and capture the final result:
 md-tool pipeline translate-md input.md --target fr = format-newlines -o final.md
 ```
 
-Split a document inside a pipeline without creating files, then normalise spacing and write the final output:
+Split a document inside a pipeline while explicitly naming the emitted parts:
 
 ```powershell
-md-tool pipeline split long.md 4 = format-newlines -o long_clean.md
+md-tool pipeline split long.md 4 -o parts\long.md
 ```
 
 ## Development shortcut
@@ -67,8 +69,8 @@ md-tool pipeline split long.md 4 = format-newlines -o long_clean.md
 For local development without installing the package, the compatibility script mirrors the CLI:
 
 ```powershell
-python split_markdown.py split path\to\file.md 3
-python split_markdown.py format-newlines path\to\file.md
+python split_markdown.py split path\to\file.md 3 -o path\to\parts.md
+python split_markdown.py format-newlines path\to\file.md -o path\to\file.cleaned.md
 python split_markdown.py combine file1.md file2.md -o combined.md
 ```
 
@@ -96,27 +98,33 @@ DESCRIPTION
         pipeline        Execute several commands in sequence without temporary files.
 
 COMMANDS
-    split <input> <parts>
+    split <input> <parts> -o BASE
         Requires a file path outside pipeline mode.
-        Accepts -o/--output inside pipeline mode to also write part files.
+        Standalone runs must include -o/--output BASE to name the emitted part files.
+        In pipelines, -o is optional unless this is the final stage (enforced before execution).
 
     combine [inputs...] [-l FILELIST] [-o OUTPUT]
         Merge explicit inputs or paths listed in FILELIST.
 
-    format-newlines <input> [-o OUTPUT]
-        Normalise spacing in-place or write to OUTPUT.
+    format-newlines <input> -o OUTPUT
+        Normalise spacing and write to OUTPUT (use the input path here for in-place updates).
+        In pipelines, omit -o for intermediate stages; it’s required when the stage is last.
 
     translate-md <input> --target LANG [options]
         Translate Markdown paragraphs concurrently. Respects all delay options.
 
     pipeline STAGE[=STAGE...]
-        Chain commands. Stage-level -o writes that stage’s result; pipeline-level
-        -o/--output writes the final artifact. Use --no-output to suppress rendering.
+        Chain commands. Stage-level -o/--output BASE writes that stage’s result;
+        pipeline-level -o/--output writes the final artifact. Pipelines with a
+        final split or format-newlines stage must include -o/--output on that
+        stage before execution begins. Use --no-output to suppress rendering.
 
 OPTIONS
-    -o, --output
-        Stage-level: write the stage result to the specified file.
-        Pipeline-level: write the final pipeline artifact to the specified file.
+    -o, --output BASE
+        For split and format-newlines, required in standalone mode (or when the
+        stage is final in a pipeline) to name their outputs. Stage-level: write
+        the stage result using BASE as the output file base name. Pipeline-level:
+        write the final pipeline artifact to the specified file.
 
     --no-output (pipeline)
         Suppress final rendering when no pipeline-level output file is requested.
@@ -125,7 +133,7 @@ OPTIONS
         Display help for md-tool or the chosen sub-command.
 
 EXAMPLES
-    md-tool split notes.md 4
+    md-tool split notes.md 4 -o notes_parts.md
     md-tool combine intro.md chapter1.md chapter2.md -o full.md
     md-tool pipeline translate-md draft.md --target es = format-newlines -o draft_es.md
 

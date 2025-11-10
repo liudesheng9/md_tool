@@ -22,10 +22,14 @@ class FormatNewlinesTool(MDTool):
             "-o",
             "--output",
             type=Path,
-            help="Optional path to write the formatted Markdown instead of modifying in place.",
+            help="Path to write the formatted Markdown (required). Use the input path here for in-place updates.",
         )
 
     def run(self, args) -> int:
+        if args.output is None:
+            sys.stderr.write("The format-newlines command requires -o/--output to specify a destination file.\n")
+            return 1
+
         if args.input is None:
             sys.stderr.write("Input file is required when not running in pipeline mode.\n")
             return 1
@@ -38,20 +42,19 @@ class FormatNewlinesTool(MDTool):
         newline = detect_newline(text)
         formatted = self.expand_single_newlines(text, newline)
 
+        target_path = args.output
+        target_directory = target_path.parent if target_path.parent != Path("") else Path(".")
+        target_directory.mkdir(parents=True, exist_ok=True)
+
         if formatted == text:
+            target_path.write_text(formatted, encoding="utf-8")
             print("Paragraph spacing already normalised.")
-            if args.output:
-                args.output.write_text(formatted, encoding="utf-8")
-                print(f"Copied Markdown to {args.output}")
+            print(f"Copied Markdown to {target_path}")
             return 0
 
-        target_path = args.output or args.input
         target_path.write_text(formatted, encoding="utf-8")
 
-        if args.output:
-            print(f"Wrote reformatted Markdown to {args.output}")
-        else:
-            print(f"Reformatted paragraph spacing in {args.input}")
+        print(f"Wrote reformatted Markdown to {target_path}")
         return 0
 
     def run_pipeline(self, args, artifact):

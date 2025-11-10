@@ -7,6 +7,7 @@ from typing import List
 
 from .combine import tool as combine_tool
 from .format_newlines import tool as format_newlines_tool
+from .manpage import print_man_page
 from .pipeline import render_artifact, run_pipeline as execute_pipeline, PipelineStageError
 from .split import tool as split_tool
 from .translate.text import register_parser as register_translate
@@ -30,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     register_translate(subparsers)
     _register_pipeline(subparsers)
+    _register_man(subparsers)
 
     return parser
 
@@ -73,6 +75,14 @@ def _register_pipeline(subparsers) -> None:
     parser.set_defaults(func=_run_pipeline_command)
 
 
+def _register_man(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "man",
+        help="Show the md-tool manual page.",
+    )
+    parser.set_defaults(func=_run_man_command)
+
+
 def _run_pipeline_command(args) -> int:
     if not args.stages:
         sys.stderr.write("No pipeline stages supplied.\n")
@@ -105,6 +115,11 @@ def _run_pipeline_command(args) -> int:
     elif not args.no_output and artifact.renderable:
         render_artifact(artifact, stream=sys.stdout)
 
+    return 0
+
+
+def _run_man_command(_args) -> int:
+    print_man_page(stream=sys.stdout)
     return 0
 
 

@@ -38,10 +38,25 @@ md-tool combine file1.md file2.md -o combined.md
 md-tool combine --file-list files.txt -o combined.md
 ```
 
-For development without installation, run the compatibility script directly:
+### Pipelines
+
+Commands can now be chained without writing intermediate files by using the
+`pipeline` sub-command. Separate stages with the equals character (`=`).
 
 ```powershell
-python split_markdown.py split path\to\file.md 3
-python split_markdown.py format-newlines path\to\file.md
-python split_markdown.py combine file1.md file2.md -o combined.md
+md-tool pipeline translate-md input.md --target fr = format-newlines --output translated.md
 ```
+
+In the example above, the translated Markdown is passed directly to the
+`format-newlines` stage, which writes the final document to `translated.md`. You
+can also collect the last stage output via the pipeline itself using the
+`-o/--output` flag, for example:
+
+```powershell
+md-tool pipeline translate-md input.md --target fr = format-newlines -o final.md
+```
+
+If no pipeline-level output is specified, the result is rendered to standard
+output (unless `--no-output` is given).
+
+For development without installation, run the compatibility script directly:

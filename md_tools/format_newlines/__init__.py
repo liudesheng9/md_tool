@@ -3,71 +3,100 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ..tools.base import MDTool
 from ..utils import detect_newline
 
 
-def register_parser(subparsers) -> None:
-    parser = subparsers.add_parser(
-        "format-newlines",
-        help="Ensure single newline separators between paragraphs are expanded to two.",
-    )
-    parser.add_argument(
-        "input", type=Path, help="Path to the Markdown file to normalise."
-    )
-    parser.set_defaults(func=run)
+class FormatNewlinesTool(MDTool):
+    name = "format-newlines"
+    help_text = "Ensure single newline separators between paragraphs are expanded to two."
 
+    def configure_parser(self, parser) -> None:
+        parser.add_argument(
+            "input",
+            type=Path,
+            nargs="?",
+            help="Path to the Markdown file to normalise. Optional in pipeline mode.",
+        )
+        parser.add_argument(
+            "-o",
+            "--output",
+            type=Path,
+            help="Optional path to write the formatted Markdown instead of modifying in place.",
+        )
 
-def expand_single_newlines(text: str, newline: str) -> str:
-    """Duplicate isolated newline separators while leaving longer runs intact."""
+    def run(self, args) -> int:
+        if args.input is None:
+            sys.stderr.write("Input file is required when not running in pipeline mode.\n")
+            return 1
 
-    if not text:
-        return text
+        if not args.input.is_file():
+            sys.stderr.write(f"Input file not found: {args.input}\n")
+            return 1
 
-    result: list[str] = []
-    i = 0
-    step = len(newline)
-    text_len = len(text)
+        text = args.input.read_text(encoding="utf-8")
+        newline = detect_newline(text)
+        formatted = self.expand_single_newlines(text, newline)
 
-    while i < text_len:
-        if text.startswith(newline, i):
-            count = 1
-            while text.startswith(newline, i + count * step):
-                count += 1
+        if formatted == text:
+            print("Paragraph spacing already normalised.")
+            if args.output:
+                args.output.write_text(formatted, encoding="utf-8")
+                print(f"Copied Markdown to {args.output}")
+            return 0
 
-            has_prev = i > 0
-            has_next = i + count * step < text_len
-            prev_is_newline = i >= step and text.startswith(newline, i - step)
-            next_is_newline = text.startswith(newline, i + count * step)
+        target_path = args.output or args.input
+        target_path.write_text(formatted, encoding="utf-8")
 
-            if count == 1 and has_prev and has_next and not prev_is_newline and not next_is_newline:
-                result.append(newline * 2)
-            else:
-                result.append(newline * count)
-
-            i += count * step
-            continue
-
-        result.append(text[i])
-        i += 1
-
-    return "".join(result)
-
-
-def run(args) -> int:
-    if not args.input.is_file():
-        sys.stderr.write(f"Input file not found: {args.input}\n")
-        return 1
-
-    text = args.input.read_text(encoding="utf-8")
-    newline = detect_newline(text)
-    formatted = expand_single_newlines(text, newline)
-
-    if formatted == text:
-        print("Paragraph spacing already normalised.")
+        if args.output:
+            print(f"Wrote reformatted Markdown to {args.output}")
+        else:
+            print(f"Reformatted paragraph spacing in {args.input}")
         return 0
 
-    args.input.write_text(formatted, encoding="utf-8")
-    print(f"Reformatted paragraph spacing in {args.input}")
-    return 0
+    def run_pipeline(self, args, artifact):
+        from ..pipeline.format_newlines import run_stage  # noqa: WPS433
+
+        return run_stage(self, args, artifact)
+
+    def expand_single_newlines(self, text: str, newline: str) -> str:
+        """Duplicate isolated newline separators while leaving longer runs intact."""
+
+        if not text:
+            return text
+
+        result: list[str] = []
+        i = 0
+        step = len(newline)
+        text_len = len(text)
+
+        while i < text_len:
+            if text.startswith(newline, i):
+                count = 1
+                while text.startswith(newline, i + count * step):
+                    count += 1
+
+                has_prev = i > 0
+                has_next = i + count * step < text_len
+                prev_is_newline = i >= step and text.startswith(newline, i - step)
+                next_is_newline = text.startswith(newline, i + count * step)
+
+                if count == 1 and has_prev and has_next and not prev_is_newline and not next_is_newline:
+                    result.append(newline * 2)
+                else:
+                    result.append(newline * count)
+
+                i += count * step
+                continue
+
+            result.append(text[i])
+            i += 1
+
+        return "".join(result)
 
 
+tool = FormatNewlinesTool()
+
+
+def register_parser(subparsers) -> None:
+    tool.register(subparsers)

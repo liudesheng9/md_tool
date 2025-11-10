@@ -9,82 +9,156 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Dict, Any
 import json
 
+from ..tools.base import MDTool
 from ..utils import detect_newline, normalise_paragraph_newlines
 from .text import TranslationError, translate_text
 
 
+class TranslateMarkdownTool(MDTool):
+    name = "translate-md"
+    help_text = "Translate a Markdown file paragraph by paragraph using Google Translate."
+
+    def configure_parser(self, parser) -> None:
+        parser.add_argument(
+            "input",
+            type=Path,
+            nargs="?",
+            help="Path to the input Markdown file. Optional in pipeline mode when upstream data is provided.",
+        )
+        parser.add_argument(
+            "-o",
+            "--output",
+            type=Path,
+            help="Optional path for the translated Markdown. Defaults to printing to stdout.",
+        )
+        parser.add_argument(
+            "-s",
+            "--source",
+            default="auto",
+            help="Source language code (default: auto-detect).",
+        )
+        parser.add_argument(
+            "-t",
+            "--target",
+            required=True,
+            help="Target language code (for example, 'es' or 'fr').",
+        )
+        parser.add_argument(
+            "--timeout",
+            type=float,
+            default=10.0,
+            help="Timeout for each translation request in seconds (default: 10).",
+        )
+        parser.add_argument(
+            "--workers",
+            type=int,
+            default=5,
+            help="Number of concurrent translation workers (default: 5).",
+        )
+        parser.add_argument(
+            "--delay-min",
+            type=float,
+            default=0,
+            help="Minimum delay in seconds after each translation request (default: 1.0).",
+        )
+        parser.add_argument(
+            "--delay-max",
+            type=float,
+            default=0.1,
+            help="Maximum delay in seconds after each translation request (default: 1.5).",
+        )
+        parser.add_argument(
+            "--bulk-delay-every",
+            type=int,
+            default=10,
+            help="After this many requests, add an extra randomized delay (0 disables bulk delays).",
+        )
+        parser.add_argument(
+            "--bulk-delay-min",
+            type=float,
+            default=0.5,
+            help="Minimum bulk delay in seconds when bulk delays are enabled (default: 2.0).",
+        )
+        parser.add_argument(
+            "--bulk-delay-max",
+            type=float,
+            default=5.0,
+            help="Maximum bulk delay in seconds when bulk delays are enabled (default: 4.0).",
+        )
+        parser.add_argument(
+            "--debug-output",
+            type=Path,
+            help="Optional path to write paragraph detection metadata as JSON.",
+        )
+
+    def run(self, args) -> int:
+        if args.input is None:
+            sys.stderr.write("Input file is required when not running in pipeline mode.\n")
+            return 1
+
+        if not args.input.is_file():
+            sys.stderr.write(f"Input file not found: {args.input}\n")
+            return 1
+
+        text = args.input.read_text(encoding="utf-8")
+
+        try:
+            result, debug_records = self.translate_document(text, args, enable_progress=True)
+        except (ValueError, TranslationError) as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+        except Exception as exc:
+            sys.stderr.write(f"Translation failed: {exc}\n")
+            return 1
+
+        if args.debug_output:
+            try:
+                self.write_debug_output(
+                    args.debug_output,
+                    source=str(args.input),
+                    target=str(args.output) if args.output else None,
+                    records=debug_records,
+                )
+            except OSError as exc:
+                sys.stderr.write(f"Failed to write debug output: {exc}\n")
+
+        if args.output:
+            args.output.write_text(result, encoding="utf-8")
+            print(f"Wrote translated Markdown to {args.output}")
+        else:
+            print(result, end="")
+
+        return 0
+
+    def run_pipeline(self, args, artifact):
+        from ..pipeline.translate_md import run_stage  # noqa: WPS433
+
+        return run_stage(self, args, artifact)
+
+    def translate_document(self, text: str, args, *, enable_progress: bool):
+        return translate_markdown_document(
+            text=text,
+            source_language=args.source,
+            target_language=args.target,
+            timeout=args.timeout,
+            workers=args.workers,
+            delay_min=args.delay_min,
+            delay_max=args.delay_max,
+            bulk_delay_every=args.bulk_delay_every,
+            bulk_delay_min=args.bulk_delay_min,
+            bulk_delay_max=args.bulk_delay_max,
+            enable_progress=enable_progress,
+        )
+
+    def write_debug_output(self, path: Path, *, source: Optional[str], target: Optional[str], records: List[Dict[str, Any]]) -> None:
+        _write_debug_output(path, source, target, records)
+
+
+tool = TranslateMarkdownTool()
+
+
 def register_parser(subparsers) -> None:
-    parser = subparsers.add_parser(
-        "translate-md",
-        help="Translate a Markdown file paragraph by paragraph using Google Translate.",
-    )
-    parser.add_argument("input", type=Path, help="Path to the input Markdown file.")
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        help="Optional path for the translated Markdown. Defaults to printing to stdout.",
-    )
-    parser.add_argument(
-        "-s",
-        "--source",
-        default="auto",
-        help="Source language code (default: auto-detect).",
-    )
-    parser.add_argument(
-        "-t",
-        "--target",
-        required=True,
-        help="Target language code (for example, 'es' or 'fr').",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=10.0,
-        help="Timeout for each translation request in seconds (default: 10).",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=5,
-        help="Number of concurrent translation workers (default: 5).",
-    )
-    parser.add_argument(
-        "--delay-min",
-        type=float,
-        default=0,
-        help="Minimum delay in seconds after each translation request (default: 1.0).",
-    )
-    parser.add_argument(
-        "--delay-max",
-        type=float,
-        default=0.1,
-        help="Maximum delay in seconds after each translation request (default: 1.5).",
-    )
-    parser.add_argument(
-        "--bulk-delay-every",
-        type=int,
-        default=10,
-        help="After this many requests, add an extra randomized delay (0 disables bulk delays).",
-    )
-    parser.add_argument(
-        "--bulk-delay-min",
-        type=float,
-        default=0.5,
-        help="Minimum bulk delay in seconds when bulk delays are enabled (default: 2.0).",
-    )
-    parser.add_argument(
-        "--bulk-delay-max",
-        type=float,
-        default=5.0,
-        help="Maximum bulk delay in seconds when bulk delays are enabled (default: 4.0).",
-    )
-    parser.add_argument(
-        "--debug-output",
-        type=Path,
-        help="Optional path to write paragraph detection metadata as JSON.",
-    )
-    parser.set_defaults(func=run)
+    tool.register(subparsers)
 
 
 class ProgressPrinter:
@@ -513,61 +587,27 @@ def translate_markdown_async(
     return [text if text is not None else "" for text in translated]
 
 
-def run(args) -> int:
-    if not args.input.is_file():
-        sys.stderr.write(f"Input file not found: {args.input}\n")
-        return 1
-
-    text = args.input.read_text(encoding="utf-8")
-    newline = detect_newline(text)
-    paragraphs, paragraph_metadata = _collect_paragraphs(text, newline)
-
-    if not any(paragraph.strip() for paragraph in paragraphs):
-        sys.stderr.write("The input file does not contain any content.\n")
-        return 1
-
-    progress = ProgressPrinter(len(paragraphs))
-    try:
-        delayer = RequestDelayer(
-            args.delay_min,
-            args.delay_max,
-            bulk_every=args.bulk_delay_every,
-            bulk_min_delay=args.bulk_delay_min,
-            bulk_max_delay=args.bulk_delay_max,
-        )
-    except ValueError as exc:
-        sys.stderr.write(f"{exc}\n")
-        return 1
-
-    try:
-        translated = translate_markdown_async(
-            paragraphs=paragraphs,
-            source_language=args.source,
-            target_language=args.target,
-            timeout=args.timeout,
-            max_workers=args.workers,
-            progress_callback=progress.update,
-            delayer=delayer,
-        )
-    except (ValueError, TranslationError) as exc:
-        sys.stderr.write(f"{exc}\n")
-        return 1
-    except Exception as exc:
-        sys.stderr.write(f"Translation failed: {exc}\n")
-        return 1
-    finally:
-        progress.finish()
-
+def _build_debug_records(
+    paragraphs: List[str],
+    paragraph_metadata: List[Dict[str, Any]],
+    translations: List[str],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     debug_records: List[Dict[str, Any]] = []
     bilingual_paragraphs: List[str] = []
-    for index, (original, translation) in enumerate(zip(paragraphs, translated)):
+
+    for index, (original, translation) in enumerate(zip(paragraphs, translations)):
         original_block = _normalise_paragraph(original)
         translated_clean = translation.strip()
 
         if index < len(paragraph_metadata):
             record = dict(paragraph_metadata[index])
         else:
-            record = {"type": "unknown", "lines": [original], "line_start": index, "line_end": index}
+            record = {
+                "type": "unknown",
+                "lines": [original],
+                "line_start": index,
+                "line_end": index,
+            }
 
         record.update(
             {
@@ -585,29 +625,78 @@ def run(args) -> int:
             bilingual_block = original_block
         bilingual_paragraphs.append(bilingual_block)
 
+    return debug_records, bilingual_paragraphs
+
+
+def _write_debug_output(path: Path, source: Optional[str], target: Optional[str], records: List[Dict[str, Any]]) -> None:
+    payload = {
+        "source": source,
+        "target": target,
+        "paragraphs": records,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def translate_markdown_document(
+    text: str,
+    *,
+    source_language: str,
+    target_language: str,
+    timeout: float,
+    workers: int,
+    delay_min: float,
+    delay_max: float,
+    bulk_delay_every: int,
+    bulk_delay_min: float,
+    bulk_delay_max: float,
+    enable_progress: bool = True,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    newline = detect_newline(text)
+    paragraphs, paragraph_metadata = _collect_paragraphs(text, newline)
+
+    if not any(paragraph.strip() for paragraph in paragraphs):
+        raise ValueError("The document does not contain any content.")
+
+    progress = ProgressPrinter(len(paragraphs)) if enable_progress else None
+    try:
+        delayer = RequestDelayer(
+            delay_min,
+            delay_max,
+            bulk_every=bulk_delay_every,
+            bulk_min_delay=bulk_delay_min,
+            bulk_max_delay=bulk_delay_max,
+        )
+    except ValueError:
+        if progress:
+            progress.finish()
+        raise
+
+    try:
+        translated = translate_markdown_async(
+            paragraphs=paragraphs,
+            source_language=source_language,
+            target_language=target_language,
+            timeout=timeout,
+            max_workers=workers,
+            progress_callback=progress.update if progress else None,
+            delayer=delayer,
+        )
+    finally:
+        if progress:
+            progress.finish()
+
+    debug_records, bilingual_paragraphs = _build_debug_records(
+        paragraphs,
+        paragraph_metadata,
+        translated,
+    )
+
     normalised = normalise_paragraph_newlines(bilingual_paragraphs, newline)
     result = newline.join(normalised)
     if text.endswith(newline):
         result += newline
 
-    if args.debug_output:
-        debug_payload = {
-            "source": str(args.input),
-            "target": str(args.output) if args.output else None,
-            "paragraphs": debug_records,
-        }
-        try:
-            args.debug_output.parent.mkdir(parents=True, exist_ok=True)
-            args.debug_output.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError as exc:
-            sys.stderr.write(f"Failed to write debug output: {exc}\n")
-
-    if args.output:
-        args.output.write_text(result, encoding="utf-8")
-        print(f"Wrote translated Markdown to {args.output}")
-    else:
-        print(result, end="")
-
-    return 0
+    return result, debug_records
 
 

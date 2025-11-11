@@ -2,6 +2,7 @@
 /md_tools.egg-info
 test/FCFS.md
 AGENTS.md
+*.pyc
 md_tools/__pycache__/*
 md_tools/combine/__pycache__/*
 md_tools/format_newlines/__pycache__/*

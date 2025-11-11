@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+import os
 from typing import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -10,6 +11,7 @@ from urllib.request import Request, urlopen
 
 
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
+FAKE_TRANSLATE_ENV = "MD_TOOL_FAKE_TRANSLATE"
 
 
 class TranslationError(Exception):
@@ -44,6 +46,10 @@ def translate_text(
     request = TranslationRequest(
         text=text, target_language=target_language, source_language=source_language, timeout=timeout
     )
+
+    fake_mode = os.environ.get(FAKE_TRANSLATE_ENV)
+    if fake_mode:
+        return _simulate_translation(request, fake_mode)
     query = urlencode(
         {
             "client": "gtx",
@@ -89,6 +95,18 @@ def translate_text(
     if not translation:
         raise TranslationError("Translation response did not contain any text.")
     return translation
+
+
+def _simulate_translation(request: TranslationRequest, mode: str) -> str:
+    label = (mode or "stub").strip() or "stub"
+    normalized = label.lower()
+    if normalized == "reverse":
+        payload = request.text[::-1]
+    elif normalized == "identity":
+        payload = request.text
+    else:
+        payload = request.text.upper()
+    return f"[{request.source_language}->{request.target_language}|{label}] {payload}"
 
 
 def register_parser(subparsers) -> None:
@@ -147,5 +165,4 @@ def run(args) -> int:
 
     print(translated)
     return 0
-
 

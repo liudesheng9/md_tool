@@ -10,13 +10,19 @@ from typing import Callable, List, Optional, Tuple, Dict, Any
 import json
 
 from ..tools.base import MDTool
+from ..tools import register_tool
 from ..utils import detect_newline, normalise_paragraph_newlines
+from .cancellation import TranslationCancelToken, TranslationCancelled
 from .text import TranslationError, translate_text
 
 
 class TranslateMarkdownTool(MDTool):
     name = "translate-md"
     help_text = "Translate a Markdown file paragraph by paragraph using Google Translate."
+
+    def __init__(self) -> None:
+        self._cancel_lock = threading.Lock()
+        self._active_cancel_token: Optional[TranslationCancelToken] = None
 
     def configure_parser(self, parser) -> None:
         parser.add_argument(
@@ -88,7 +94,7 @@ class TranslateMarkdownTool(MDTool):
         parser.add_argument(
             "--retry-count",
             type=int,
-            default=3,
+            default=5,
             help="Number of times to retry a failed translation request (default: 3).",
         )
         parser.add_argument(
@@ -122,6 +128,9 @@ class TranslateMarkdownTool(MDTool):
 
         try:
             result, debug_records = self.translate_document(text, args, enable_progress=True)
+        except KeyboardInterrupt:
+            self.cancel_active_translation()
+            raise
         except (ValueError, TranslationError) as exc:
             sys.stderr.write(f"{exc}\n")
             return 1
@@ -161,29 +170,58 @@ class TranslateMarkdownTool(MDTool):
             output_mode="single",
         )
 
+    def cancel_active_translation(self) -> None:
+        with self._cancel_lock:
+            token = self._active_cancel_token
+        if token is not None:
+            token.cancel()
+
+    def _set_active_token(self, token: TranslationCancelToken) -> None:
+        with self._cancel_lock:
+            self._active_cancel_token = token
+
+    def _clear_active_token(self, token: TranslationCancelToken) -> None:
+        with self._cancel_lock:
+            if self._active_cancel_token is token:
+                self._active_cancel_token = None
+
     def translate_document(self, text: str, args, *, enable_progress: bool):
-        return translate_markdown_document(
-            text=text,
-            source_language=args.source,
-            target_language=args.target,
-            timeout=args.timeout,
-            workers=args.workers,
-            delay_min=args.delay_min,
-            delay_max=args.delay_max,
-            bulk_delay_every=args.bulk_delay_every,
-            bulk_delay_min=args.bulk_delay_min,
-            bulk_delay_max=args.bulk_delay_max,
-            retry_count=args.retry_count,
-            retry_delay_min=args.retry_delay_min,
-            retry_delay_max=args.retry_delay_max,
-            enable_progress=enable_progress,
-        )
+        cancel_token = TranslationCancelToken()
+        self._set_active_token(cancel_token)
+        try:
+            return translate_markdown_document(
+                text=text,
+                source_language=args.source,
+                target_language=args.target,
+                timeout=args.timeout,
+                workers=args.workers,
+                delay_min=args.delay_min,
+                delay_max=args.delay_max,
+                bulk_delay_every=args.bulk_delay_every,
+                bulk_delay_min=args.bulk_delay_min,
+                bulk_delay_max=args.bulk_delay_max,
+                retry_count=args.retry_count,
+                retry_delay_min=args.retry_delay_min,
+                retry_delay_max=args.retry_delay_max,
+                enable_progress=enable_progress,
+                cancel_token=cancel_token,
+            )
+        except TranslationCancelled as exc:
+            cancel_token.cancel()
+            raise KeyboardInterrupt from exc
+        except KeyboardInterrupt:
+            cancel_token.cancel()
+            raise
+        finally:
+            cancel_token.cancel()
+            self._clear_active_token(cancel_token)
 
     def write_debug_output(self, path: Path, *, source: Optional[str], target: Optional[str], records: List[Dict[str, Any]]) -> None:
         _write_debug_output(path, source, target, records)
 
 
 tool = TranslateMarkdownTool()
+register_tool(tool, category="transform")
 
 
 def register_parser(subparsers) -> None:
@@ -409,6 +447,7 @@ class RequestDelayer:
         bulk_every: int = 0,
         bulk_min_delay: float = 0.0,
         bulk_max_delay: float = 0.0,
+        cancel_token: Optional[TranslationCancelToken] = None,
     ) -> None:
         if min_delay < 0 or max_delay < 0:
             raise ValueError("Delay values must be non-negative.")
@@ -428,14 +467,18 @@ class RequestDelayer:
         self._bulk_max_delay = bulk_max_delay
         self._lock = threading.Lock()
         self._counter = 0
+        self._cancel_token = cancel_token
 
-    @staticmethod
-    def _sleep_random(min_delay: float, max_delay: float) -> None:
+    def _sleep_random(self, min_delay: float, max_delay: float) -> None:
         if max_delay == 0 and min_delay == 0:
             return
         delay = random.uniform(min_delay, max_delay)
         if delay > 0:
-            time.sleep(delay)
+            if self._cancel_token:
+                self._cancel_token.wait(delay)
+                self._cancel_token.raise_if_cancelled()
+            else:
+                time.sleep(delay)
 
     def pause(self) -> None:
         with self._lock:
@@ -532,14 +575,22 @@ def _segment_paragraph(paragraph: str) -> List[Tuple[List[str], bool]]:
     return segments
 
 
-def _sleep_between_retries(min_delay: float, max_delay: float) -> None:
+def _sleep_between_retries(
+    min_delay: float,
+    max_delay: float,
+    cancel_token: Optional[TranslationCancelToken] = None,
+) -> None:
     if min_delay <= 0 and max_delay <= 0:
         return
     lower = max(0.0, min_delay)
     upper = max(lower, max_delay)
     delay = random.uniform(lower, upper) if upper > lower else upper
     if delay > 0:
-        time.sleep(delay)
+        if cancel_token:
+            cancel_token.wait(delay)
+            cancel_token.raise_if_cancelled()
+        else:
+            time.sleep(delay)
 
 
 def _translate_with_retry(
@@ -551,9 +602,12 @@ def _translate_with_retry(
     max_retries: int,
     retry_delay_min: float,
     retry_delay_max: float,
+    cancel_token: Optional[TranslationCancelToken] = None,
 ) -> str:
     attempts = max(0, max_retries) + 1
     for attempt_index in range(attempts):
+        if cancel_token:
+            cancel_token.raise_if_cancelled()
         try:
             return translate_text(
                 text=text,
@@ -570,7 +624,7 @@ def _translate_with_retry(
                 f"\n[translate-md] Translation failed ({exc}); retry {retry_number}/{total_retries} after backoff.\n"
             )
             sys.stderr.flush()
-            _sleep_between_retries(retry_delay_min, retry_delay_max)
+            _sleep_between_retries(retry_delay_min, retry_delay_max, cancel_token)
 
 
 def _translate_paragraph(
@@ -582,12 +636,16 @@ def _translate_paragraph(
     max_retries: int,
     retry_delay_min: float,
     retry_delay_max: float,
+    cancel_token: Optional[TranslationCancelToken] = None,
 ) -> str:
+    token = cancel_token or TranslationCancelToken()
+    token.raise_if_cancelled()
     segments = _segment_paragraph(paragraph)
 
     output_lines: List[str] = []
     translated_any = False
     for lines, should_translate in segments:
+        token.raise_if_cancelled()
         if should_translate:
             block = "\n".join(lines)
             normalised = _normalise_paragraph(block)
@@ -600,6 +658,7 @@ def _translate_paragraph(
                     max_retries=max_retries,
                     retry_delay_min=retry_delay_min,
                     retry_delay_max=retry_delay_max,
+                    cancel_token=token,
                 )
                 translated_lines = translated.splitlines()
                 if translated_lines:
@@ -608,6 +667,7 @@ def _translate_paragraph(
                     output_lines.append(translated)
                 translated_any = translated_any or bool(translated.strip())
                 delayer.pause()
+                token.raise_if_cancelled()
         else:
             output_lines.extend(lines)
 
@@ -628,13 +688,15 @@ def translate_markdown_async(
     max_retries: int = 0,
     retry_delay_min: float = 0.0,
     retry_delay_max: float = 0.0,
+    cancel_token: Optional[TranslationCancelToken] = None,
 ) -> List[str]:
     if max_workers < 1:
         raise ValueError("Worker count must be at least 1.")
 
+    token = cancel_token or TranslationCancelToken()
     total = len(paragraphs)
     translated: List[Optional[str]] = [None] * total
-    active_delayer = delayer or RequestDelayer(0.0, 0.0)
+    active_delayer = delayer or RequestDelayer(0.0, 0.0, cancel_token=token)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -648,6 +710,7 @@ def translate_markdown_async(
                 max_retries,
                 retry_delay_min,
                 retry_delay_max,
+                token,
             ): index
             for index, paragraph in enumerate(paragraphs)
         }
@@ -655,12 +718,18 @@ def translate_markdown_async(
         completed = 0
         try:
             for future in as_completed(futures):
+                if token.is_cancelled():
+                    raise TranslationCancelled()
                 index = futures[future]
                 translation = future.result()
                 translated[index] = translation
                 completed += 1
                 if progress_callback:
                     progress_callback(completed)
+        except TranslationCancelled:
+            for pending in futures:
+                pending.cancel()
+            raise
         except Exception:
             for pending in futures:
                 pending.cancel()
@@ -736,7 +805,10 @@ def translate_markdown_document(
     retry_delay_min: float,
     retry_delay_max: float,
     enable_progress: bool = True,
+    cancel_token: Optional[TranslationCancelToken] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
+    cancel = cancel_token or TranslationCancelToken()
+
     newline = detect_newline(text)
     paragraphs, paragraph_metadata = _collect_paragraphs(text, newline)
 
@@ -748,6 +820,8 @@ def translate_markdown_document(
     retry_delay_min = max(0.0, retry_delay_min)
     retry_delay_max = max(retry_delay_min, retry_delay_max)
 
+    cancel.raise_if_cancelled()
+
     progress = ProgressPrinter(len(paragraphs)) if enable_progress else None
     try:
         delayer = RequestDelayer(
@@ -756,6 +830,7 @@ def translate_markdown_document(
             bulk_every=bulk_delay_every,
             bulk_min_delay=bulk_delay_min,
             bulk_max_delay=bulk_delay_max,
+            cancel_token=cancel,
         )
     except ValueError:
         if progress:
@@ -774,7 +849,11 @@ def translate_markdown_document(
             max_retries=retry_count,
             retry_delay_min=retry_delay_min,
             retry_delay_max=retry_delay_max,
+            cancel_token=cancel,
         )
+    except KeyboardInterrupt:
+        cancel.cancel()
+        raise
     finally:
         if progress:
             progress.finish()

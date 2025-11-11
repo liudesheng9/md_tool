@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ...pipeline.types import MarkdownArtifact, MarkdownDocument, PipelineStageError
+from ...pipeline.stage_runner import PipelineStageRunner
 from ...utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
 
 
@@ -68,9 +69,11 @@ def _split_document(tool, document: MarkdownDocument, parts: int, stage_name: st
 
 def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtifact:
     stage_name = tool.name
+    context = PipelineStageRunner(stage_name, args, artifact)
 
-    if args.parts is None or args.parts < 1:
-        if args.parts is None:
+    parts = tool.resolve_parts(args)
+    if parts is None or parts < 1:
+        if parts is None:
             raise PipelineStageError("The number of parts must be provided.", stage=stage_name)
         raise PipelineStageError("The number of parts must be at least 1.", stage=stage_name)
 
@@ -78,18 +81,18 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
         document, _ = _load_document(args, stage_name)
         documents = [document]
     else:
-        documents = [doc.clone() for doc in artifact.documents]
+        documents = context.upstream_documents()
 
-    if args.output and len(documents) != 1:
-        raise PipelineStageError(
+    if args.output:
+        context.ensure_single_document(
+            documents,
             "-o/--output can only be used when the split stage receives a single document.",
-            stage=stage_name,
         )
 
     result_documents: List[MarkdownDocument] = []
     for document in documents:
-        parts, grouped, newline, paragraph_count = _split_document(tool, document, args.parts, stage_name)
-        result_documents.extend(parts)
+        split_docs, grouped, newline, paragraph_count = _split_document(tool, document, parts, stage_name)
+        result_documents.extend(split_docs)
 
         if args.output:
             output_base = Path(args.output)
@@ -100,11 +103,11 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
             )
             print(f"Paragraphs found: {paragraph_count}")
             print(
-                f"Wrote {len(parts)} file(s) to {output_base.parent} "
+                f"Wrote {len(split_docs)} file(s) to {output_base.parent} "
                 f"using prefix {output_base.stem}_part_"
             )
         else:
             label = document.name or "document"
-            print(f"Split {label} into {len(parts)} part(s); files not written (pipeline mode).")
+            print(f"Split {label} into {len(split_docs)} part(s); files not written (pipeline mode).")
 
     return MarkdownArtifact(result_documents, renderable=True)

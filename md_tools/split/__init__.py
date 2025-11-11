@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from ..tools.base import MDTool
+from ..tools import register_tool
 from ..utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
 
 
@@ -29,7 +30,7 @@ class SplitTool(MDTool):
         parser.add_argument(
             "-n",
             "--parts",
-            dest="parts",
+            dest="parts_flag",
             type=int,
             help="Alias for the number of parts (for pipeline usage).",
         )
@@ -44,10 +45,12 @@ class SplitTool(MDTool):
         )
 
     def run(self, args) -> int:
-        if args.parts is None:
+        parts = self.resolve_parts(args)
+
+        if parts is None:
             sys.stderr.write("The number of parts must be provided (e.g., 'split <input> 3' or 'split --parts 3').\n")
             return 1
-        if args.parts < 1:
+        if parts < 1:
             sys.stderr.write("The number of parts must be at least 1.\n")
             return 1
 
@@ -71,14 +74,14 @@ class SplitTool(MDTool):
             sys.stderr.write("The input file does not contain any paragraphs.\n")
             return 1
 
-        if args.parts > paragraph_count:
+        if parts > paragraph_count:
             sys.stderr.write(
                 "Requested number of parts exceeds the number of paragraphs; refusing to split.\n"
             )
             return 1
 
         newline = detect_newline(text)
-        grouped = self.split_paragraphs(paragraphs, args.parts)
+        grouped = self.split_paragraphs(paragraphs, parts)
         written_paths = self.write_parts(
             grouped,
             newline,
@@ -102,6 +105,12 @@ class SplitTool(MDTool):
         from ..pipeline.split import run_stage  # noqa: WPS433
 
         return run_stage(self, args, artifact)
+
+    def resolve_parts(self, args) -> Optional[int]:
+        override = getattr(args, "parts_flag", None)
+        if override is not None:
+            return override
+        return getattr(args, "parts", None)
 
     def pipeline_caps(self) -> MDTool.PipelineCaps:
         # Split consumes one doc and emits many docs
@@ -186,6 +195,7 @@ class SplitTool(MDTool):
 
 
 tool = SplitTool()
+register_tool(tool, category="document")
 
 
 def register_parser(subparsers) -> None:

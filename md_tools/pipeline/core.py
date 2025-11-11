@@ -6,7 +6,7 @@ from typing import Callable, List, Sequence, Optional
 
 from .types import MarkdownArtifact, PipelineStageError
 
-AUTO_OUTPUT_STAGES = {"split", "format-newlines"}
+AUTO_OUTPUT_STAGES = {"split"}
 
 
 def _split_stages(tokens: Sequence[str]) -> List[List[str]]:
@@ -177,28 +177,3 @@ def run_pipeline(
 
     return artifact or MarkdownArtifact([])
 
-
-def render_artifact(artifact: MarkdownArtifact, stream = sys.stdout) -> None:
-    if not artifact.renderable:
-        return
-
-    documents = artifact.documents
-
-    if not documents:
-        stream.write("")
-        return
-
-    if len(documents) == 1:
-        stream.write(documents[0].text)
-        if not documents[0].text.endswith(("\n", "\r")):
-            stream.write("\n")
-        return
-
-    for index, document in enumerate(documents, start=1):
-        if index > 1:
-            stream.write("\n")
-        title = document.name or f"Document {index}"
-        stream.write(f"--- {title} ---\n")
-        stream.write(document.text)
-        if not document.text.endswith(("\n", "\r")):
-            stream.write("\n")

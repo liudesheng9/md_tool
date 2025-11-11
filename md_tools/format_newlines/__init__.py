@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from ..tools.base import MDTool
+from ..tools import register_tool
 from ..utils import detect_newline
 
 
@@ -107,6 +108,7 @@ class FormatNewlinesTool(MDTool):
 
 
 tool = FormatNewlinesTool()
+register_tool(tool, category="transform")
 
 
 def register_parser(subparsers) -> None:

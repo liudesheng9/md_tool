@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 
 from ..tools.base import MDTool
+from ..tools import register_tool
 from ..utils import detect_newline
 
 
@@ -112,6 +113,7 @@ class CombineTool(MDTool):
 
 
 tool = CombineTool()
+register_tool(tool, category="document")
 
 
 def register_parser(subparsers) -> None:

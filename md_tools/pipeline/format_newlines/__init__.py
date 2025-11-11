@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ...pipeline.types import MarkdownArtifact, MarkdownDocument, PipelineStageError
+from ...pipeline.stage_runner import PipelineStageRunner
 from ...utils import detect_newline
 
 
@@ -25,11 +26,8 @@ def _load_document(args, stage_name: str) -> MarkdownDocument:
 
 def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtifact:
     stage_name = tool.name
-
-    if artifact is None or not artifact.documents:
-        documents = [_load_document(args, stage_name)]
-    else:
-        documents = [doc.clone() for doc in artifact.documents]
+    context = PipelineStageRunner(stage_name, args, artifact)
+    documents = context.load_or_upstream(lambda: _load_document(args, stage_name))
 
     result_documents: list[MarkdownDocument] = []
     for index, document in enumerate(documents, start=1):
@@ -57,23 +55,22 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
 
     renderable = True
     if args.output:
-        if len(result_documents) != 1:
-            raise PipelineStageError(
-                "-o/--output can only be used when the stage produces a single document.",
-                stage=stage_name,
-            )
+        context.ensure_single_document(
+            result_documents,
+            "-o/--output can only be used when the stage produces a single document.",
+        )
         try:
             formatted_text = result_documents[0].text
             original_text = documents[0].text
             if formatted_text == original_text:
                 print("Paragraph spacing already normalised.")
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(formatted_text, encoding="utf-8")
-        except OSError as exc:
-            raise PipelineStageError(
-                f"Failed to write formatted Markdown: {exc}",
-                stage=stage_name,
-            ) from exc
+            context.write_text(
+                args.output,
+                formatted_text,
+                error_prefix="Failed to write formatted Markdown",
+            )
+        except PipelineStageError:
+            raise
         if result_documents[0].text == documents[0].text:
             print(f"Copied Markdown to {args.output}")
         else:
@@ -84,4 +81,3 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
         renderable = False
 
     return MarkdownArtifact(result_documents, renderable=renderable)
-

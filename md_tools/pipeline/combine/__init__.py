@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import List, Optional
 
 from ...pipeline.types import MarkdownArtifact, PipelineStageError
+from ...pipeline.stage_runner import PipelineStageRunner
 
 
 def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtifact:
     stage_name = tool.name
+    context = PipelineStageRunner(stage_name, args, artifact)
     allow_empty = artifact is not None
 
     try:
@@ -29,8 +31,9 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
         file_contents = tool.read_files(inputs)
 
     texts: List[str] = []
-    if artifact is not None:
-        texts.extend(document.text for document in artifact.documents)
+    upstream = context.upstream_documents()
+    if upstream:
+        texts.extend(document.text for document in upstream)
 
     texts.extend(file_contents)
 
@@ -45,15 +48,12 @@ def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtif
 
     renderable = True
     if args.output:
-        try:
-            args.output.write_text(combined, encoding="utf-8")
-        except OSError as exc:
-            raise PipelineStageError(
-                f"Failed to write combined Markdown: {exc}",
-                stage=stage_name,
-            ) from exc
+        context.write_text(
+            args.output,
+            combined,
+            error_prefix="Failed to write combined Markdown",
+        )
         print(f"Wrote combined Markdown to {args.output}")
         renderable = False
 
     return MarkdownArtifact.from_text(combined, name=output_name, renderable=renderable)
-

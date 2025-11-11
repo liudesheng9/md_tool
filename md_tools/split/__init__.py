@@ -22,7 +22,16 @@ class SplitTool(MDTool):
         parser.add_argument(
             "parts",
             type=int,
+            nargs="?",
             help="Number of parts to split the document into (must be >= 1)",
+        )
+        # Optional flag alias to support pipeline-friendly 'split 5' via token rewrite
+        parser.add_argument(
+            "-n",
+            "--parts",
+            dest="parts",
+            type=int,
+            help="Alias for the number of parts (for pipeline usage).",
         )
         parser.add_argument(
             "-o",
@@ -35,6 +44,9 @@ class SplitTool(MDTool):
         )
 
     def run(self, args) -> int:
+        if args.parts is None:
+            sys.stderr.write("The number of parts must be provided (e.g., 'split <input> 3' or 'split --parts 3').\n")
+            return 1
         if args.parts < 1:
             sys.stderr.write("The number of parts must be at least 1.\n")
             return 1
@@ -90,6 +102,14 @@ class SplitTool(MDTool):
         from ..pipeline.split import run_stage  # noqa: WPS433
 
         return run_stage(self, args, artifact)
+
+    def pipeline_caps(self) -> MDTool.PipelineCaps:
+        # Split consumes one doc and emits many docs
+        return MDTool.PipelineCaps(
+            allow_stage_input=False,
+            input_mode="single",
+            output_mode="multi",
+        )
 
     def split_paragraphs(self, paragraphs: List[str], parts: int) -> List[List[str]]:
         """Split paragraphs into the requested number of parts."""

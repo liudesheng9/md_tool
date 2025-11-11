@@ -62,6 +62,14 @@ class FormatNewlinesTool(MDTool):
 
         return run_stage(self, args, artifact)
 
+    def pipeline_caps(self) -> MDTool.PipelineCaps:
+        # One input, one output (structure-preserving transformer)
+        return MDTool.PipelineCaps(
+            allow_stage_input=False,
+            input_mode="single",
+            output_mode="single",
+        )
+
     def expand_single_newlines(self, text: str, newline: str) -> str:
         """Duplicate isolated newline separators while leaving longer runs intact."""
 

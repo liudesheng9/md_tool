@@ -69,7 +69,9 @@ def _split_document(tool, document: MarkdownDocument, parts: int, stage_name: st
 def run_stage(tool, args, artifact: Optional[MarkdownArtifact]) -> MarkdownArtifact:
     stage_name = tool.name
 
-    if args.parts < 1:
+    if args.parts is None or args.parts < 1:
+        if args.parts is None:
+            raise PipelineStageError("The number of parts must be provided.", stage=stage_name)
         raise PipelineStageError("The number of parts must be at least 1.", stage=stage_name)
 
     if artifact is None or not artifact.documents:

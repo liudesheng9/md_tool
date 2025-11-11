@@ -22,11 +22,15 @@ py -m pip install -e .
 
 ### Pipeline highlights
 
-- Stages are chained with `=` (for example, `split doc.md 3 = format-newlines`).
+- Start with a single global input using `-i/--input <file>`.
+- Chain stages with `=` (for example, `-i doc.md = format-newlines = split 3 -o parts.md`).
+- Single-input tools (translate-md, format-newlines, split) must NOT specify their own input in pipelines.
+  The pipeline rejects stage-level input paths; the first input comes only from `-i`.
 - Each stage reuses the same in-memory Markdown, eliminating temporary files unless `-o/--output` is used.
 - Stage execution is logged to `stderr`, and progress indicators (e.g. from `translate-md`) remain visible.
 - A pipeline-level `-o/--output` writes the final artifact; otherwise output is rendered to `stdout` unless `--no-output` is provided.
-- Stage-level `-o/--output <path>` writes files for that stage only (and suppresses rendering of that stage’s result). The `split` and `format-newlines` commands always require this flag in standalone mode; pass the input path again if you want an in-place update. Inside pipelines it’s only mandatory when that command is the final stage, and the parser enforces this before any work runs.
+- Stage-level `-o/--output <path>` writes files for that stage only (and suppresses rendering of that stage’s result).
+  Inside pipelines it’s only mandatory when that command is the final stage (e.g., final `split`/`format-newlines`).
 
 ## Usage Examples
 
@@ -55,13 +59,13 @@ md-tool combine --file-list files.txt -o combined.md
 Translate to French, tidy paragraph spacing, and capture the final result:
 
 ```powershell
-md-tool pipeline translate-md input.md --target fr = format-newlines -o final.md
+md-tool pipeline -i input.md = translate-md --target fr = format-newlines -o final.md
 ```
 
 Split a document inside a pipeline while explicitly naming the emitted parts:
 
 ```powershell
-md-tool pipeline split long.md 4 -o parts\long.md
+md-tool pipeline -i long.md = split 4 -o parts\long.md
 ```
 
 ## Development shortcut
@@ -86,7 +90,7 @@ NAME
 
 SYNOPSIS
     md-tool <command> [options]
-    md-tool pipeline <stage>=<stage>[=...]
+    md-tool pipeline -i <input> [=]<stage>[=...]
     md-tool man
 
 DESCRIPTION
@@ -113,11 +117,14 @@ COMMANDS
     translate-md <input> --target LANG [options]
         Translate Markdown paragraphs concurrently. Respects all delay options.
 
-    pipeline STAGE[=STAGE...]
-        Chain commands. Stage-level -o/--output BASE writes that stage’s result;
-        pipeline-level -o/--output writes the final artifact. Pipelines with a
-        final split or format-newlines stage must include -o/--output on that
-        stage before execution begins. Use --no-output to suppress rendering.
+    pipeline -i INPUT [=]STAGE[=STAGE...]
+        Begin with a single global INPUT via -i/--input, then chain stages with '='.
+        Single-input tools (translate-md, format-newlines, split) must NOT
+        provide a positional input inside pipelines; the pipeline will refuse
+        such invocations before any stage runs.
+        Stage-level -o/--output BASE writes that stage’s result; pipeline-level
+        -o/--output writes the final artifact. Pipelines with a final split or
+        format-newlines stage must include -o/--output on that final stage.
 
 OPTIONS
     -o, --output BASE
@@ -135,7 +142,13 @@ OPTIONS
 EXAMPLES
     md-tool split notes.md 4 -o notes_parts.md
     md-tool combine intro.md chapter1.md chapter2.md -o full.md
-    md-tool pipeline translate-md draft.md --target es = format-newlines -o draft_es.md
+    md-tool pipeline -i draft.md = translate-md --target es = format-newlines -o draft_es.md
+
+REFUSAL BEHAVIOR
+    The pipeline rejects stage-level input paths for single-input tools. For example:
+        md-tool pipeline translate-md draft.md --target es = format-newlines
+    is refused. Use:
+        md-tool pipeline -i draft.md = translate-md --target es = format-newlines
 
 AUTHOR
     md-tool contributors.

@@ -64,6 +64,14 @@ class CombineTool(MDTool):
 
         return run_stage(self, args, artifact)
 
+    def pipeline_caps(self) -> MDTool.PipelineCaps:
+        # Combine may accept many upstream docs and/or many file paths; produces one doc
+        return MDTool.PipelineCaps(
+            allow_stage_input=True,
+            input_mode="multi",
+            output_mode="single",
+        )
+
     def gather_inputs(self, args) -> List[Path]:
         if args.file_list:
             return self.load_file_list(args.file_list)

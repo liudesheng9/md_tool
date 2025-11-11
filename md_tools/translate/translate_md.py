@@ -153,6 +153,14 @@ class TranslateMarkdownTool(MDTool):
 
         return run_stage(self, args, artifact)
 
+    def pipeline_caps(self) -> MDTool.PipelineCaps:
+        # One input document; one output document (debug is a side artifact)
+        return MDTool.PipelineCaps(
+            allow_stage_input=False,
+            input_mode="single",
+            output_mode="single",
+        )
+
     def translate_document(self, text: str, args, *, enable_progress: bool):
         return translate_markdown_document(
             text=text,

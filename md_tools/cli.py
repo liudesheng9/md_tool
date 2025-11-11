@@ -57,9 +57,21 @@ def _register_pipeline(subparsers) -> None:
         help="Execute a Markdown processing pipeline (stages separated by '=').",
     )
     parser.add_argument(
+        "-i",
+        "--input",
+        type=Path,
+        required=True,
+        help=(
+            "Path to the initial Markdown file for the pipeline. "
+            "Use '=' to chain subsequent tools, e.g. -i file.md = translate-md ..."
+        ),
+    )
+    parser.add_argument(
         "stages",
         nargs=argparse.REMAINDER,
-        help="Pipeline expression, e.g. translate-md input.md --target fr = format-newlines",
+        help=(
+            "Pipeline stages after '=' separators, e.g. = translate-md --target fr = format-newlines"
+        ),
     )
     parser.add_argument(
         "-o",
@@ -89,7 +101,7 @@ def _run_pipeline_command(args) -> int:
         return 1
 
     try:
-        artifact = execute_pipeline(args.stages, build_parser)
+        artifact = execute_pipeline(args.stages, build_parser, input_path=args.input)
     except PipelineStageError as exc:
         prefix = f"[{exc.stage}] " if exc.stage else ""
         sys.stderr.write(f"{prefix}{exc}\n")
@@ -121,5 +133,3 @@ def _run_pipeline_command(args) -> int:
 def _run_man_command(_args) -> int:
     print_man_page(stream=sys.stdout)
     return 0
-
-

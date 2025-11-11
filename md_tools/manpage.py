@@ -9,7 +9,7 @@ NAME
 
 SYNOPSIS
     md-tool <command> [options]
-    md-tool pipeline <stage>=<stage>[=...]
+    md-tool pipeline -i <input> [=]<stage>[=...]
     md-tool man
 
 DESCRIPTION
@@ -36,21 +36,26 @@ COMMANDS
     translate-md <input> --target LANG [options]
         Translate Markdown paragraphs concurrently. Respects all delay options.
 
-    pipeline STAGE[=STAGE...]
-        Chain commands. Stage-level -o/--output BASE writes that stage’s result;
-        pipeline-level -o/--output writes the final artifact. Pipelines with a
-        final split or format-newlines stage must include -o/--output on that
-        stage before execution begins. Use --no-output to suppress rendering.
+    pipeline -i INPUT [=]STAGE[=STAGE...]
+        Begin with a single global INPUT via -i/--input, then chain stages with '='.
+        Single-input tools (translate-md, format-newlines, split) must NOT provide
+        positional inputs inside pipelines; these are rejected before execution.
+        Stage-level -o/--output BASE writes that stage’s result; pipeline-level
+        -o/--output writes the final artifact. Pipelines with a final split or
+        format-newlines stage must include -o/--output on that final stage.
+        Pipelines no longer render Markdown to stdout; files are produced only
+        when -o/--output is supplied at either the stage or pipeline level.
 
 OPTIONS
     -o, --output BASE
         For split and format-newlines, required in standalone mode (or when the
         stage is final in a pipeline) to name their outputs. Stage-level: write
         the stage result using BASE as the output file base name. Pipeline-level:
-        write the final pipeline artifact to the specified file.
+        write the final pipeline artifact to the specified file. Without any -o,
+        pipelines complete silently without emitting files.
 
     --no-output (pipeline)
-        Suppress final rendering when no pipeline-level output file is requested.
+        Reserved for backwards compatibility (stdout rendering is already disabled).
 
     --help
         Display help for md-tool or the chosen sub-command.
@@ -58,7 +63,7 @@ OPTIONS
 EXAMPLES
     md-tool split notes.md 4 -o notes_parts.md
     md-tool combine intro.md chapter1.md chapter2.md -o full.md
-    md-tool pipeline translate-md draft.md --target es = format-newlines -o draft_es.md
+    md-tool pipeline -i draft.md = translate-md --target es = format-newlines -o draft_es.md
 
 AUTHOR
     md-tool contributors.

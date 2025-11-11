@@ -28,9 +28,9 @@ py -m pip install -e .
   The pipeline rejects stage-level input paths; the first input comes only from `-i`.
 - Each stage reuses the same in-memory Markdown, eliminating temporary files unless `-o/--output` is used.
 - Stage execution is logged to `stderr`, and progress indicators (e.g. from `translate-md`) remain visible.
-- A pipeline-level `-o/--output` writes the final artifact; otherwise output is rendered to `stdout` unless `--no-output` is provided.
-- Stage-level `-o/--output <path>` writes files for that stage only (and suppresses rendering of that stage’s result).
-  Inside pipelines it’s only mandatory when that command is the final stage (e.g., final `split`/`format-newlines`).
+- A pipeline-level `-o/--output` writes the final artifact. Without that (or stage-level outputs), the pipeline runs silently and does not render Markdown to `stdout`.
+- Stage-level `-o/--output <path>` writes files for that stage only. Inside pipelines it’s mandatory when the command is the final stage (e.g., final `split`/`format-newlines`).
+- `--no-output` is retained for compatibility but has no effect now that pipelines never render automatically.
 
 ## Usage Examples
 
@@ -125,16 +125,19 @@ COMMANDS
         Stage-level -o/--output BASE writes that stage’s result; pipeline-level
         -o/--output writes the final artifact. Pipelines with a final split or
         format-newlines stage must include -o/--output on that final stage.
+        Pipelines do not render to stdout; outputs appear only when -o/--output
+        is supplied at either the stage or pipeline level.
 
 OPTIONS
     -o, --output BASE
         For split and format-newlines, required in standalone mode (or when the
         stage is final in a pipeline) to name their outputs. Stage-level: write
         the stage result using BASE as the output file base name. Pipeline-level:
-        write the final pipeline artifact to the specified file.
+        write the final pipeline artifact to the specified file. Without any -o,
+        pipelines complete silently.
 
     --no-output (pipeline)
-        Suppress final rendering when no pipeline-level output file is requested.
+        Reserved for compatibility (pipelines already suppress stdout rendering).
 
     --help
         Display help for md-tool or the chosen sub-command.
@@ -143,12 +146,6 @@ EXAMPLES
     md-tool split notes.md 4 -o notes_parts.md
     md-tool combine intro.md chapter1.md chapter2.md -o full.md
     md-tool pipeline -i draft.md = translate-md --target es = format-newlines -o draft_es.md
-
-REFUSAL BEHAVIOR
-    The pipeline rejects stage-level input paths for single-input tools. For example:
-        md-tool pipeline translate-md draft.md --target es = format-newlines
-    is refused. Use:
-        md-tool pipeline -i draft.md = translate-md --target es = format-newlines
 
 AUTHOR
     md-tool contributors.

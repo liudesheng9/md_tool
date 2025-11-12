@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import shlex
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,16 +13,21 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import (
-    Button,
-    Footer,
-    Header,
-    Input,
-    Label,
-    ListItem,
-    ListView,
-    Static,
-)
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static, Switch
+
+try:  # Textual 0.60+ provides TextLog; fall back for older releases.
+    from textual.widgets import TextLog  # type: ignore
+except ImportError:  # pragma: no cover - compatibility shim
+    class TextLog(VerticalScroll):
+        """Minimal shim that mimics TextLog.write for older Textual releases."""
+
+        def __init__(self, *_, id: str | None = None, classes: str | None = None, **__) -> None:
+            super().__init__(id=id, classes=classes)
+
+        def write(self, line: str) -> None:
+            if not line:
+                return
+            self.mount(Static(line, classes="log-line"))
 
 from ..tool_manager import PipelinePayload, StagePayload, ToolManager
 from ..tools import iter_tool_specs
@@ -118,6 +125,8 @@ class ToolManagerApp(App):
         self.selected_files: list[Path] = []
         self.pipeline: list[PipelineStageModel] = []
         self.output_overrides: dict[Path, dict[int, str]] = {}
+        self.output_manual_overrides: dict[Path, set[int]] = {}
+        self.output_disabled: dict[Path, set[int]] = {}
         self.tool_manager = ToolManager()
         self.tool_names = sorted(spec.tool.name for spec in iter_tool_specs())
 
@@ -128,6 +137,8 @@ class ToolManagerApp(App):
     def set_selected_files(self, files: list[Path]) -> None:
         self.selected_files = files
         self.output_overrides = {}
+        self.output_manual_overrides = {}
+        self.output_disabled = {}
 
     def add_stage(self, name: str, args: list[str]) -> None:
         self.pipeline.append(PipelineStageModel(name=name, args=args))
@@ -149,10 +160,28 @@ class ToolManagerApp(App):
             for path, mapping in self.output_overrides.items()
             if path in self.selected_files
         }
+        self.output_manual_overrides = {
+            path: {idx for idx in indices if idx in valid_indices}
+            for path, indices in self.output_manual_overrides.items()
+            if path in self.selected_files
+        }
+        self.output_disabled = {
+            path: {idx for idx in indices if idx in valid_indices}
+            for path, indices in self.output_disabled.items()
+            if path in self.selected_files
+        }
         for file_path in self.selected_files:
             mapping = self.output_overrides.setdefault(file_path, {})
+            manual = self.output_manual_overrides.setdefault(file_path, set())
+            disabled = self.output_disabled.setdefault(file_path, set())
             for idx in valid_indices:
-                mapping.setdefault(idx, self._default_output_path(file_path, idx))
+                default_value = self._default_output_path(file_path, idx)
+                if idx in manual:
+                    mapping.setdefault(idx, default_value)
+                else:
+                    mapping[idx] = default_value
+                if idx == len(self.pipeline) - 1 and idx in disabled:
+                    disabled.remove(idx)
 
     def _default_output_path(self, file_path: Path, stage_index: int) -> str:
         suffix = file_path.suffix or ".md"
@@ -166,6 +195,18 @@ class ToolManagerApp(App):
     def update_output_override(self, file_path: Path, stage_index: int, path: str) -> None:
         mapping = self.output_overrides.setdefault(file_path, {})
         mapping[stage_index] = path
+        manual = self.output_manual_overrides.setdefault(file_path, set())
+        manual.add(stage_index)
+
+    def update_output_disabled(self, file_path: Path, stage_index: int, disabled: bool) -> None:
+        mapping = self.output_disabled.setdefault(file_path, set())
+        if stage_index == len(self.pipeline) - 1:
+            mapping.discard(stage_index)
+            return
+        if disabled:
+            mapping.add(stage_index)
+        else:
+            mapping.discard(stage_index)
 
     def stage_requires_output(self, stage_index: int) -> bool:
         if not (0 <= stage_index < len(self.pipeline)):
@@ -182,11 +223,12 @@ class ToolManagerApp(App):
         for file_path in self.selected_files:
             stages: list[StagePayload] = []
             overrides = self.output_overrides.get(file_path, {})
+            disabled_indices = self.output_disabled.get(file_path, set())
             for index, stage in enumerate(self.pipeline):
                 args = list(stage.args)
                 flag = OUTPUT_FLAG_MAP.get(stage.name)
                 override_path = overrides.get(index)
-                if flag and override_path:
+                if flag and override_path and index not in disabled_indices:
                     args = apply_output_flag(args, flag, override_path)
                 stages.append(StagePayload(stage.name, tuple(args)))
             payloads.append(PipelinePayload(input_path=file_path, stages=tuple(stages)))
@@ -209,7 +251,7 @@ class StepOneScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Vertical(
+        yield VerticalScroll(
             Static("Step 1/4 – Select Markdown files", classes="step-title"),
             Static("Choose one or more .md files from the provided root directory.", classes="step-help"),
             ListView(id="file-list", classes="panel"),
@@ -234,7 +276,7 @@ class StepOneScreen(Screen):
         for index, path in enumerate(app.available_files):
             marker = "[x]" if path in self.temp_selected else "[ ]"
             label = Static(f"{marker} {path.relative_to(app.root)}", markup=False)
-            item = ListItem(label, id=f"file-{index}")
+            item = ListItem(label)
             item.data = str(path)
             list_view.append(item)
 
@@ -318,7 +360,7 @@ class StepTwoScreen(Screen):
             child.remove()
         for index, stage in enumerate(app.pipeline):
             display = f"{index + 1}. {stage.name} {' '.join(stage.args)}".strip()
-            item = ListItem(Static(display), id=f"pipe-{index}")
+            item = ListItem(Static(display))
             item.data = index
             list_view.append(item)
         graph = " -> ".join(["input"] + [stage.name for stage in app.pipeline]) or "input"
@@ -388,19 +430,89 @@ class OutputField(Static):
             self.path = path
             super().__init__()
 
-    def __init__(self, stage_index: int, stage_name: str, value: str) -> None:
+    class Toggled(Message):
+        def __init__(self, sender: OutputField, stage_index: int, enabled: bool) -> None:
+            self.stage_index = stage_index
+            self.enabled = enabled
+            super().__init__()
+
+    def __init__(
+        self,
+        stage_index: int,
+        stage_name: str,
+        value: str,
+        *,
+        allow_disable: bool,
+        enabled: bool,
+    ) -> None:
         super().__init__(classes="output-field")
         self.stage_index = stage_index
         self.stage_name = stage_name
         self.value = value
+        self.allow_disable = allow_disable
+        self.enabled = enabled
+        self._input_id = f"output-{self.stage_index}"
+        self._switch_id = f"output-toggle-{self.stage_index}"
+        self._body_id = f"output-body-{self.stage_index}"
 
     def compose(self) -> ComposeResult:
-        yield Label(f"{self.stage_index + 1}. {self.stage_name}")
-        yield Input(value=self.value, id=f"output-{self.stage_index}")
+        label = Label(f"{self.stage_index + 1}. {self.stage_name}")
+        if self.allow_disable:
+            yield Horizontal(
+                label,
+                Static("Emit output"),
+                Switch(
+                    value=self.enabled,
+                    id=self._switch_id,
+                ),
+            )
+        else:
+            yield label
+        yield Vertical(id=self._body_id)
+
+    def on_mount(self) -> None:
+        self._render_body()
+
+    def _render_body(self) -> None:
+        body = self.query_one(f"#{self._body_id}", Vertical)
+        for child in list(body.children):
+            child.remove()
+        if self.allow_disable and not self.enabled:
+            body.mount(
+                Static(
+                    "This stage will not write an intermediate file.",
+                    classes="output-disabled-message",
+                )
+            )
+            return
+        input_widget = Input(value=self.value, id=self._input_id)
+        body.mount(input_widget)
+
+    def _active_input(self) -> Input | None:
+        if self.allow_disable and not self.enabled:
+            return None
+        try:
+            return self.query_one(f"#{self._input_id}", Input)
+        except Exception:
+            return None
 
     @on(Input.Changed)
     def handle_change(self, event: Input.Changed) -> None:
+        if self.allow_disable and not self.enabled:
+            return
+        self.value = event.value
         self.post_message(OutputField.Changed(self, self.stage_index, event.value))
+
+    @on(Switch.Changed)
+    def handle_toggle(self, event: Switch.Changed) -> None:
+        if not self.allow_disable or event.switch.id != self._switch_id:
+            return
+        self.enabled = bool(event.value)
+        self._render_body()
+        input_widget = self._active_input()
+        if input_widget is not None:
+            input_widget.value = self.value
+        self.post_message(OutputField.Toggled(self, self.stage_index, self.enabled))
 
 
 class StepThreeScreen(Screen):
@@ -457,17 +569,27 @@ class StepThreeScreen(Screen):
         for child in list(editor.children):
             child.remove()
         overrides = app.output_overrides.get(self.current_file, {})
+        disabled = app.output_disabled.get(self.current_file, set())
         for idx in app.configurable_stage_indices():
             stage = app.pipeline[idx]
+            allow_disable = idx != len(app.pipeline) - 1 and stage.name in OUTPUT_FLAG_MAP
             label = "Final Output" if idx == len(app.pipeline) - 1 else stage.name
             value = overrides.get(idx, app._default_output_path(self.current_file, idx))
-            editor.mount(OutputField(idx, label, value))
+            editor.mount(
+                OutputField(
+                    idx,
+                    label,
+                    value,
+                    allow_disable=allow_disable,
+                    enabled=idx not in disabled,
+                )
+            )
 
     def _build_output_file_list(self, app: ToolManagerApp) -> ListView:
         items: list[ListItem] = []
         for index, path in enumerate(app.selected_files):
             label = Static(str(path.relative_to(app.root)))
-            item = ListItem(label, id=f"out-file-{index}")
+            item = ListItem(label)
             item.data = str(path)
             items.append(item)
         return ListView(*items, id="output-file-list", classes="panel")
@@ -486,6 +608,13 @@ class StepThreeScreen(Screen):
         app: ToolManagerApp = self.app  # type: ignore[assignment]
         app.update_output_override(self.current_file, event.stage_index, event.path)
 
+    @on(OutputField.Toggled)
+    def on_output_toggled(self, event: OutputField.Toggled) -> None:
+        if not self.current_file:
+            return
+        app: ToolManagerApp = self.app  # type: ignore[assignment]
+        app.update_output_disabled(self.current_file, event.stage_index, not event.enabled)
+
     @on(Button.Pressed, "#run-pipelines")
     def handle_run(self) -> None:
         app: ToolManagerApp = self.app  # type: ignore[assignment]
@@ -495,12 +624,45 @@ class StepThreeScreen(Screen):
         result_screen = StepFourScreen()
         self.app.push_screen(result_screen)
 
+        textual_app: ToolManagerApp = self.app  # type: ignore[assignment]
+
+        class ScreenLogWriter(io.TextIOBase):
+            def __init__(self, owner: ToolManagerApp, screen: StepFourScreen) -> None:
+                self._owner = owner
+                self._screen = screen
+
+            def write(self, data: str) -> int:  # pragma: no cover - Textual integration
+                if not data:
+                    return 0
+                try:
+                    self._owner.call_from_thread(self._screen.append_log, data)
+                except RuntimeError:
+                    return len(data)
+                return len(data)
+
+            def flush(self) -> None:  # pragma: no cover - Textual integration
+                try:
+                    self._owner.call_from_thread(self._screen.flush_pending_log)
+                except RuntimeError:
+                    pass
+
+        log_writer = ScreenLogWriter(textual_app, result_screen)
+
         async def runner() -> None:
             try:
-                message = await asyncio.to_thread(app.run_selected_pipelines)
+                def run_with_capture() -> str:
+                    with redirect_stdout(log_writer), redirect_stderr(log_writer):
+                        return app.run_selected_pipelines()
+
+                message = await asyncio.to_thread(run_with_capture)
             except Exception as exc:  # pragma: no cover - runtime safeguard
                 message = f"Pipeline failed: {exc}"
-            result_screen.update_message(message)
+            finally:
+                try:
+                    log_writer.flush()
+                except RuntimeError:
+                    pass
+            result_screen.mark_complete(message)
 
         asyncio.create_task(runner())
 
@@ -515,38 +677,77 @@ class StepFourScreen(Screen):
     def __init__(self, initial_message: str = "Running pipelines...") -> None:
         super().__init__()
         self.message = initial_message
-        self._pending_message: str | None = None
         self._complete = False
+        self._pending_lines: list[str] = [initial_message] if initial_message else []
+        self._partial_line = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Vertical(
-            Static("Step 4/4 – Pipeline execution", classes="step-title"),
+        yield VerticalScroll(
+            Static("Step 4/4 - Pipeline execution", classes="step-title"),
             Static(
-                "The selected pipelines are running. You can close this screen once they finish.",
+                "The selected pipelines are running. Logs and progress updates appear below.",
                 classes="step-help",
             ),
-            Static(self.message, id="run-status", classes="panel"),
+            TextLog(
+                id="run-log",
+                classes="panel",
+                highlight=False,
+                markup=False,
+                wrap=True,
+            ),
             Button("Close", id="finish-step4", variant="primary", disabled=not self._complete),
             id="step-container",
         )
         yield Footer()
 
-    def update_message(self, message: str) -> None:
+    def on_mount(self) -> None:
+        self._drain_pending_lines()
+        finish_btn = self.query_one("#finish-step4", Button)
+        finish_btn.disabled = not self._complete
+
+    def append_log(self, text: str) -> None:
+        if not text:
+            return
+        buffer = f"{self._partial_line}{text}"
+        parts = buffer.splitlines(keepends=True)
+        self._partial_line = ""
+        for part in parts:
+            if part.endswith(("\n", "\r")):
+                self._emit_line(part.rstrip("\r\n"))
+            else:
+                self._partial_line += part
+
+    def flush_pending_log(self) -> None:
+        if self._partial_line:
+            self._emit_line(self._partial_line)
+            self._partial_line = ""
+
+    def _emit_line(self, line: str) -> None:
+        if self.is_mounted:
+            log = self.query_one("#run-log", TextLog)
+            log.write(line)
+        else:
+            self._pending_lines.append(line)
+
+    def _drain_pending_lines(self) -> None:
+        if not self._pending_lines:
+            return
+        log = self.query_one("#run-log", TextLog)
+        for line in self._pending_lines:
+            log.write(line)
+        self._pending_lines.clear()
+
+    def mark_complete(self, message: str) -> None:
         self.message = message
+        if message:
+            suffix = "" if message.endswith("\n") else "\n"
+            self.append_log(f"{message}{suffix}")
+        self.flush_pending_log()
         self._complete = True
         if self.is_mounted:
-            self.query_one("#run-status", Static).update(message)
             finish_btn = self.query_one("#finish-step4", Button)
             finish_btn.disabled = False
-        else:
-            self._pending_message = message
-
-    def on_mount(self) -> None:
-        if self._pending_message is not None:
-            message = self._pending_message
-            self._pending_message = None
-            self.update_message(message)
 
     @on(Button.Pressed, "#finish-step4")
     def handle_close(self) -> None:

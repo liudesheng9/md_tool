@@ -229,10 +229,11 @@ class StepOneScreen(Screen):
     def refresh_file_list(self) -> None:
         app: ToolManagerApp = self.app  # type: ignore[assignment]
         list_view = self.query_one("#file-list", ListView)
-        list_view.clear()
+        for child in list(list_view.children):
+            child.remove()
         for index, path in enumerate(app.available_files):
             marker = "[x]" if path in self.temp_selected else "[ ]"
-            label = Static(f"{marker} {path.relative_to(app.root)}")
+            label = Static(f"{marker} {path.relative_to(app.root)}", markup=False)
             item = ListItem(label, id=f"file-{index}")
             item.data = str(path)
             list_view.append(item)
@@ -313,7 +314,8 @@ class StepTwoScreen(Screen):
     def refresh_pipeline_view(self) -> None:
         app: ToolManagerApp = self.app  # type: ignore[assignment]
         list_view = self.query_one("#pipeline-list", ListView)
-        list_view.clear()
+        for child in list(list_view.children):
+            child.remove()
         for index, stage in enumerate(app.pipeline):
             display = f"{index + 1}. {stage.name} {' '.join(stage.args)}".strip()
             item = ListItem(Static(display), id=f"pipe-{index}")

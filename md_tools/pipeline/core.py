@@ -2,9 +2,67 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable, List, Sequence, Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union
 
 from .types import MarkdownArtifact, PipelineStageError
+
+StageToken = Union[str, int, float, Path]
+StageFunc = Callable[[argparse.Namespace, MarkdownArtifact], MarkdownArtifact]
+
+
+class PipelineOutputSpec:
+    """Base descriptor that tools can extend to declare their stage outputs."""
+
+    def resolve(self, _args: argparse.Namespace) -> Tuple[Path, ...]:
+        return ()
+
+
+@dataclass(frozen=True)
+class StagePlan:
+    tokens: Tuple[StageToken, ...]
+
+    def __post_init__(self) -> None:
+        if not self.tokens:
+            raise ValueError("StagePlan requires at least one token.")
+
+
+@dataclass(frozen=True)
+class PipelineStage:
+    name: str
+    tokens: Tuple[str, ...]
+    args: argparse.Namespace
+    func: StageFunc
+    caps: object | None
+    outputs: Tuple[Path, ...] = ()
+
+    @property
+    def label(self) -> str:
+        return " ".join(self.tokens) if self.tokens else self.name
+
+
+@dataclass(frozen=True)
+class PipelineDefinition:
+    stages: Tuple[PipelineStage, ...]
+    input_path: Path
+
+    def __post_init__(self) -> None:
+        if not self.stages:
+            raise PipelineStageError("No stages were provided to the pipeline.", stage=None)
+
+    def all_output_paths(self) -> List[Path]:
+        paths: List[Path] = []
+        for stage in self.stages:
+            paths.extend(stage.outputs)
+        return paths
+
+    def final_output_path(self) -> Path | None:
+        for stage in reversed(self.stages):
+            if stage.outputs:
+                return stage.outputs[-1]
+        return None
+
 
 AUTO_OUTPUT_STAGES = {"split"}
 
@@ -13,20 +71,13 @@ def _split_stages(tokens: Sequence[str]) -> List[List[str]]:
     stages: List[List[str]] = []
     current: List[str] = []
 
-    # Allow and skip initial '=' for grammar like: -i file.md = cmd ...
     iterator = iter(tokens)
     for token in iterator:
         if not stages and not current and token == "=":
-            # Skip leading '='
             continue
-
-        # Regular processing
         if token == "=":
             if not current:
-                raise PipelineStageError(
-                    "Encountered '=' with no preceding stage.",
-                    stage=None,
-                )
+                raise PipelineStageError("Encountered '=' with no preceding stage.", stage=None)
             stages.append(current)
             current = []
         else:
@@ -45,10 +96,7 @@ def _parse_stage(
     parser_factory: Callable[[], argparse.ArgumentParser],
     tokens: Sequence[str],
 ) -> argparse.Namespace:
-    # Rewrite convenience form `split 5` in pipeline to use --parts
-    # so that a positional optional 'input' defined by the tool doesn't capture '5'.
     if tokens and tokens[0] == "split":
-        # tokens: ["split", "5", ...] -> ["split", "--parts", "5", ...]
         if len(tokens) >= 2 and not tokens[1].startswith("-"):
             try:
                 int(tokens[1])
@@ -78,37 +126,24 @@ def _parse_stage(
     return args
 
 
-def run_pipeline(
+def build_pipeline_definition(
     raw_tokens: Sequence[str],
     parser_factory: Callable[[], argparse.ArgumentParser],
     *,
-    input_path: Optional["Path"] = None,
-) -> MarkdownArtifact:
-    from pathlib import Path  # local import to avoid cycles in some environments
-
-    if input_path is None:
-        raise PipelineStageError(
-            "Pipeline requires a global -i/--input file before '='. Example: "
-            "md-tool pipeline -i file.md = translate-md ...",
-            stage=None,
-        )
-
-    if not Path(input_path).is_file():
-        raise PipelineStageError(f"Input file not found: {input_path}", stage=None)
-
-    try:
-        initial_text = Path(input_path).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise PipelineStageError(f"Failed to read input file: {exc}", stage=None) from exc
-
-    stages = _split_stages(raw_tokens)
-
-    parsed_stages: List[tuple[List[str], argparse.Namespace]] = []
-    for tokens in stages:
+    input_path: Path,
+) -> PipelineDefinition:
+    stages_raw = _split_stages(raw_tokens)
+    parsed: List[PipelineStage] = []
+    for tokens in stages_raw:
         args = _parse_stage(parser_factory, tokens)
         stage_name = getattr(args, "command", tokens[0] if tokens else "<unknown>")
+        pipeline_func = getattr(args, "pipeline_func", None)
+        if pipeline_func is None:
+            raise PipelineStageError(
+                f"Stage '{stage_name}' is missing pipeline execution support.",
+                stage=stage_name,
+            )
         caps = getattr(args, "pipeline_caps", None)
-        # Refuse stage-level input usage for tools that don't allow it
         if getattr(caps, "allow_stage_input", False) is False:
             if hasattr(args, "input") and getattr(args, "input") is not None:
                 raise PipelineStageError(
@@ -118,28 +153,64 @@ def run_pipeline(
                     ),
                     stage=stage_name,
                 )
-        parsed_stages.append((tokens, args))
 
-    if parsed_stages:
-        last_tokens, last_args = parsed_stages[-1]
-        last_stage_name = getattr(last_args, "command", last_tokens[0] if last_tokens else "<unknown>")
-        if last_stage_name in AUTO_OUTPUT_STAGES:
-            output_value = getattr(last_args, "output", None)
-            if not output_value:
-                raise PipelineStageError(
-                    f"The final stage '{last_stage_name}' requires -o/--output to be provided.",
-                    stage=last_stage_name,
-                )
+        outputs = _resolve_stage_outputs(args)
+        parsed.append(
+            PipelineStage(
+                name=stage_name,
+                tokens=tuple(tokens),
+                args=args,
+                func=pipeline_func,
+                caps=caps,
+                outputs=outputs,
+            )
+        )
+
+    _validate_auto_output(parsed)
+    return PipelineDefinition(tuple(parsed), input_path=Path(input_path))
+
+
+def _validate_auto_output(stages: Sequence[PipelineStage]) -> None:
+    if not stages:
+        return
+    last_stage = stages[-1]
+    if last_stage.name in AUTO_OUTPUT_STAGES:
+        output_value = getattr(last_stage.args, "output", None)
+        if not output_value:
+            raise PipelineStageError(
+                f"The final stage '{last_stage.name}' requires -o/--output to be provided.",
+                stage=last_stage.name,
+            )
+
+
+def _resolve_stage_outputs(args: argparse.Namespace) -> Tuple[Path, ...]:
+    spec = getattr(args, "pipeline_output_spec", None)
+    if spec is None:
+        return ()
+    paths = tuple(spec.resolve(args))
+    return tuple(path for path in paths if isinstance(path, Path))
+
+
+def run_pipeline(pipeline_definition: PipelineDefinition) -> MarkdownArtifact:
+    input_path = pipeline_definition.input_path
+
+    if not input_path.is_file():
+        raise PipelineStageError(f"Input file not found: {input_path}", stage=None)
+
+    try:
+        initial_text = input_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PipelineStageError(f"Failed to read input file: {exc}", stage=None) from exc
 
     artifact: MarkdownArtifact | None = MarkdownArtifact.from_text(
         initial_text, name=str(input_path)
     )
-    for index, (tokens, args) in enumerate(parsed_stages, start=1):
-        stage_name = getattr(args, "command", tokens[0] if tokens else "<unknown>")
-        pipeline_func = getattr(args, "pipeline_func")
-        caps = getattr(args, "pipeline_caps", None)
+    for index, stage in enumerate(pipeline_definition.stages, start=1):
+        stage_name = stage.name
+        pipeline_func = stage.func
+        caps = stage.caps
+        args = stage.args
 
-        # Enforce input cardinality before executing the stage
         if caps is not None:
             doc_count = len(artifact.documents) if artifact and artifact.documents is not None else 0
             mode = getattr(caps, "input_mode", "single")
@@ -153,7 +224,7 @@ def run_pipeline(
                     stage=stage_name,
                 )
 
-        stage_label = " ".join(tokens) if tokens else stage_name
+        stage_label = stage.label
         sys.stderr.write(f"Conducting {stage_name} (tool) [stage {index}]: {stage_label}\n")
         sys.stderr.flush()
 
@@ -177,3 +248,33 @@ def run_pipeline(
 
     return artifact or MarkdownArtifact([])
 
+
+def build_pipeline_definition_from_stage_plans(
+    stage_plans: Sequence[StagePlan],
+    parser_factory: Callable[[], argparse.ArgumentParser],
+    *,
+    input_path: Path,
+) -> PipelineDefinition:
+    if not stage_plans:
+        raise ValueError("At least one StagePlan must be provided.")
+
+    raw_tokens: List[str] = []
+    for index, plan in enumerate(stage_plans):
+        if index != 0:
+            raw_tokens.append("=")
+        raw_tokens.extend(_stringify_stage_tokens(plan.tokens))
+
+    return build_pipeline_definition(raw_tokens, parser_factory, input_path=input_path)
+
+
+def _stringify_stage_tokens(tokens: Iterable[StageToken]) -> List[str]:
+    result: List[str] = []
+    for token in tokens:
+        if isinstance(token, Path):
+            value = str(token)
+        else:
+            value = str(token)
+        if not value:
+            raise ValueError("Pipeline tokens must be non-empty strings.")
+        result.append(value)
+    return result

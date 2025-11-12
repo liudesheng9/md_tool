@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
 from ..utils import detect_newline
@@ -71,6 +72,9 @@ class FormatNewlinesTool(MDTool):
             output_mode="single",
         )
 
+    def pipeline_output_spec(self) -> PipelineOutputSpec | None:
+        return _FormatNewlinesOutputSpec()
+
     def expand_single_newlines(self, text: str, newline: str) -> str:
         """Duplicate isolated newline separators while leaving longer runs intact."""
 
@@ -113,3 +117,11 @@ register_tool(tool, category="transform")
 
 def register_parser(subparsers) -> None:
     tool.register(subparsers)
+
+
+class _FormatNewlinesOutputSpec(PipelineOutputSpec):
+    def resolve(self, args) -> tuple[Path, ...]:
+        output = getattr(args, "output", None)
+        if output:
+            return (output,)
+        return ()

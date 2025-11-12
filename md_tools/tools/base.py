@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
+from ..pipeline.core import PipelineOutputSpec
 from ..pipeline.types import MarkdownArtifact, PipelineStageError
 
 
@@ -21,6 +22,7 @@ class MDTool(ABC):
             pipeline_func=self.run_pipeline,
             command=self.name,
             pipeline_caps=self.pipeline_caps(),
+            pipeline_output_spec=self.pipeline_output_spec(),
         )
 
     @abstractmethod
@@ -61,3 +63,7 @@ class MDTool(ABC):
             output_mode="single",
         )
 
+    def pipeline_output_spec(self) -> PipelineOutputSpec | None:
+        """Return a spec describing which files this stage writes, if any."""
+
+        return None

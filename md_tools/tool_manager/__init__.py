@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from .manager import PipelineInput, ToolManager
+from .manager import ToolManager
 
 __all__ = [
-    "PipelineInput",
     "ToolManager",
 ]

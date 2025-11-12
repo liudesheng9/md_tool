@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .core import run_pipeline as execute_pipeline
+from .core import PipelineDefinition, build_pipeline_definition, run_pipeline as execute_pipeline
 from .types import PipelineStageError
 
 
@@ -16,10 +16,14 @@ class PipelineCommand:
         self,
         *,
         parser_factory: Callable[[], argparse.ArgumentParser],
-        executor: Callable[[Sequence[str], Callable[[], argparse.ArgumentParser]], object] = execute_pipeline,
+        executor: Callable[..., object] = execute_pipeline,
+        definition_builder: Callable[
+            [Sequence[str], Callable[[], argparse.ArgumentParser]], PipelineDefinition
+        ] = build_pipeline_definition,
     ) -> None:
         self._parser_factory = parser_factory
         self._executor = executor
+        self._definition_builder = definition_builder
 
     def register(self, subparsers) -> None:
         parser = subparsers.add_parser(
@@ -63,7 +67,12 @@ class PipelineCommand:
             return 1
 
         try:
-            artifact = self._executor(args.stages, self._parser_factory, input_path=args.input)
+            pipeline_definition = self._definition_builder(
+                args.stages,
+                self._parser_factory,
+                input_path=args.input,
+            )
+            artifact = self._executor(pipeline_definition)
         except PipelineStageError as exc:
             prefix = f"[{exc.stage}] " if exc.stage else ""
             sys.stderr.write(f"{prefix}{exc}\n")

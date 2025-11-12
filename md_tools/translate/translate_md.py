@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Dict, Any
 import json
 
+from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
 from ..utils import detect_newline, normalise_paragraph_newlines
@@ -170,6 +171,9 @@ class TranslateMarkdownTool(MDTool):
             output_mode="single",
         )
 
+    def pipeline_output_spec(self) -> PipelineOutputSpec | None:
+        return _TranslateMarkdownOutputSpec()
+
     def cancel_active_translation(self) -> None:
         with self._cancel_lock:
             token = self._active_cancel_token
@@ -226,6 +230,18 @@ register_tool(tool, category="transform")
 
 def register_parser(subparsers) -> None:
     tool.register(subparsers)
+
+
+class _TranslateMarkdownOutputSpec(PipelineOutputSpec):
+    def resolve(self, args) -> tuple[Path, ...]:
+        outputs: list[Path] = []
+        output = getattr(args, "output", None)
+        if output:
+            outputs.append(output)
+        debug_output = getattr(args, "debug_output", None)
+        if debug_output:
+            outputs.append(debug_output)
+        return tuple(outputs)
 
 
 class ProgressPrinter:

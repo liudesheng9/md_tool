@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
 from ..utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
@@ -120,6 +121,9 @@ class SplitTool(MDTool):
             output_mode="multi",
         )
 
+    def pipeline_output_spec(self) -> PipelineOutputSpec | None:
+        return _SplitOutputSpec(self)
+
     def split_paragraphs(self, paragraphs: List[str], parts: int) -> List[List[str]]:
         """Split paragraphs into the requested number of parts."""
 
@@ -200,3 +204,24 @@ register_tool(tool, category="document")
 
 def register_parser(subparsers) -> None:
     tool.register(subparsers)
+
+
+def _build_part_paths(base_path: Path, parts: int) -> List[Path]:
+    suffix = base_path.suffix or ".md"
+    stem = base_path.stem or "part"
+    directory = base_path.parent if base_path.parent != Path("") else Path(".")
+    return [directory / f"{stem}_part_{index}{suffix}" for index in range(1, parts + 1)]
+
+
+class _SplitOutputSpec(PipelineOutputSpec):
+    def __init__(self, tool: SplitTool) -> None:
+        self._tool = tool
+
+    def resolve(self, args) -> tuple[Path, ...]:
+        output_base = getattr(args, "output", None)
+        if output_base is None:
+            return ()
+        parts = self._tool.resolve_parts(args)
+        if parts is None or parts < 1:
+            return ()
+        return tuple(_build_part_paths(output_base, parts))

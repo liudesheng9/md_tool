@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
 from ..utils import detect_newline
@@ -73,6 +74,9 @@ class CombineTool(MDTool):
             output_mode="single",
         )
 
+    def pipeline_output_spec(self) -> PipelineOutputSpec | None:
+        return _CombineOutputSpec()
+
     def gather_inputs(self, args) -> List[Path]:
         if args.file_list:
             return self.load_file_list(args.file_list)
@@ -118,3 +122,11 @@ register_tool(tool, category="document")
 
 def register_parser(subparsers) -> None:
     tool.register(subparsers)
+
+
+class _CombineOutputSpec(PipelineOutputSpec):
+    def resolve(self, args) -> tuple[Path, ...]:
+        output = getattr(args, "output", None)
+        if output:
+            return (output,)
+        return ()

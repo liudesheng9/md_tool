@@ -19,6 +19,7 @@ py -m pip install -e .
 - **format-newlines** – normalise paragraph spacing by duplicating isolated blank lines.
 - **translate-md** – translate Markdown paragraph-by-paragraph while preserving tables, equations, and code.
 - **pipeline** – execute any sequence of the above tools without writing intermediate results to disk.
+- **tool-adapter** – CLI helper that lets you pick Markdown inputs from a directory before running a pipeline.
 
 ### Pipeline highlights
 
@@ -67,6 +68,20 @@ Split a document inside a pipeline while explicitly naming the emitted parts:
 ```powershell
 md-tool pipeline -i long.md = split 4 -o parts\long.md
 ```
+
+## md-tool TUI
+
+`md-tool tui <directory>` launches **md-tool-tui**, a Textual wizard that walks through three stages:
+
+1. **Select files** – Recursively scans the directory (and sub-folders). Use `Space` to toggle multiple files, then press `Ctrl+N` (or the on-screen button) to continue.
+2. **Build the pipeline** – Type the same grammar accepted by `md-tool pipeline` (e.g. `translate-md --target fr = format-newlines`). A live schematic diagram, `input -> [translate-md --target fr] -> [format-newlines]`, updates as you edit.
+3. **Name outputs** – For each selected file you can edit both the single-output filename (complete with extension) and the multi-output base used for `_part_<n>` files. The preview panel shows the exact names (`chapter_out.md`, `chapter_out_part_<n>.md`).
+
+Additional details:
+
+- Press `Ctrl+B` to move to the previous page, `Ctrl+R` (or the “Run pipeline” button) on the final page to execute.
+- Pipelines run sequentially per file; progress and tool logs still stream in the terminal.
+- Powered by [`textual`](https://textual.textualize.io/) (installed automatically). The command requires an interactive terminal.
 
 ## Development shortcut
 

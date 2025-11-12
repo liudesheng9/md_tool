@@ -6,6 +6,7 @@ from typing import List
 
 from .manpage import print_man_page
 from .pipeline.command import PipelineCommand
+from .pipeline.tool_adapter import ToolAdapterCommand
 from .pipeline import run_pipeline as execute_pipeline
 from .translate.text import register_parser as register_translate
 from .tools import iter_tool_specs
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         executor=execute_pipeline,
     )
     pipeline_command.register(subparsers)
+    tui_command = ToolAdapterCommand(
+        parser_factory=build_parser,
+        executor=execute_pipeline,
+    )
+    tui_command.register(subparsers)
     _register_man(subparsers)
 
     return parser

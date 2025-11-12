@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from md_tools.pipeline import MarkdownArtifact, PipelineDefinition
-from md_tools.tool_manager import ToolManager
+from md_tools.tool_manager import PipelinePayload, StagePayload, ToolManager
 
 MARKERS = ["Oliver Hart", "Library of Congress"]
 TRANSLATE_ARGS: tuple[str, ...] = (
@@ -32,6 +32,7 @@ TRANSLATE_ARGS: tuple[str, ...] = (
 )
 os.environ.setdefault("MD_TOOL_FAKE_TRANSLATE", "stub")
 INPUT_PATH = REPO_ROOT / "test" / "FCFS.md"
+TRANSLATE_BASE_ARGS: List[str] = [str(arg) for arg in TRANSLATE_ARGS[1:]]
 
 
 def cleanup(paths: Iterable[Path]) -> None:
@@ -48,7 +49,7 @@ def slugify(value: str) -> str:
 
 
 Validator = Callable[[PipelineDefinition, MarkdownArtifact, str], tuple[bool, str]]
-StageBuilder = Callable[["ManagerScenario", str], List[List[object]]]
+StageBuilder = Callable[["ManagerScenario", str], List[StagePayload]]
 SetupFunc = Callable[["ManagerScenario", PipelineDefinition, str], Iterable[Path]]
 
 
@@ -63,74 +64,80 @@ def expect_marker_count(marker: str, minimum: int) -> Validator:
     return _validator
 
 
-def build_format_split_segments(scenario: "ManagerScenario", slug: str, *, use_parts_flag: bool) -> List[List[object]]:
+def stage_entry(stage_name: str, *args: object) -> StagePayload:
+    return StagePayload(stage_name=stage_name, args=tuple(str(arg) for arg in args))
+
+
+def build_format_split_segments(
+    scenario: "ManagerScenario", slug: str, *, use_parts_flag: bool
+) -> List[StagePayload]:
     split_base = scenario.artifact_path(slug, "split_base")
     final_output = scenario.artifact_path(slug, "final")
     if use_parts_flag:
-        split_tokens = ["split", "--parts", scenario.split_parts, "-o", split_base]
+        split_args = ["--parts", scenario.split_parts, "-o", split_base]
     else:
-        split_tokens = ["split", scenario.split_parts, "-o", split_base]
+        split_args = [scenario.split_parts, "-o", split_base]
     return [
-        ["format-newlines"],
-        split_tokens,
-        ["combine", "--output", final_output],
+        stage_entry("format-newlines"),
+        stage_entry("split", *split_args),
+        stage_entry("combine", "--output", final_output),
     ]
 
 
-def build_split_combine_format_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_split_combine_format_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     split_base = scenario.artifact_path(slug, "split_base")
     final_output = scenario.artifact_path(slug, "final")
     return [
-        ["split", scenario.split_parts, "-o", split_base],
-        ["combine"],
-        ["format-newlines", "--output", final_output],
+        stage_entry("split", scenario.split_parts, "-o", split_base),
+        stage_entry("combine"),
+        stage_entry("format-newlines", "--output", final_output),
     ]
 
 
-def build_format_combine_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_format_combine_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     final_output = scenario.artifact_path(slug, "final")
     return [
-        ["format-newlines"],
-        ["combine", "--output", final_output],
+        stage_entry("format-newlines"),
+        stage_entry("combine", "--output", final_output),
     ]
 
 
-def build_format_writes_middle_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_format_writes_middle_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     middle_path = scenario.artifact_path(slug, "format_middle", scenario.middle_ext)
     final_output = scenario.artifact_path(slug, "final")
     return [
-        ["format-newlines", "--output", middle_path],
-        ["combine", "--output", final_output],
+        stage_entry("format-newlines", "--output", middle_path),
+        stage_entry("combine", "--output", final_output),
     ]
 
 
-def build_format_translate_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_format_translate_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     final_output = scenario.artifact_path(slug, "final")
     debug_output = scenario.artifact_path(slug, "translate_debug", ".json")
-    translate_tokens = list(TRANSLATE_ARGS) + ["--output", final_output, "--debug-output", debug_output]
+    translate_tokens = TRANSLATE_BASE_ARGS + ["--output", final_output, "--debug-output", debug_output]
     return [
-        ["format-newlines"],
-        translate_tokens,
+        stage_entry("format-newlines"),
+        stage_entry("translate-md", *translate_tokens),
     ]
 
 
-def build_translate_format_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_translate_format_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     debug_output = scenario.artifact_path(slug, "translate_debug", ".json")
     final_output = scenario.artifact_path(slug, "final")
-    translate_tokens = list(TRANSLATE_ARGS) + ["--debug-output", debug_output]
+    translate_tokens = TRANSLATE_BASE_ARGS + ["--debug-output", debug_output]
     return [
-        translate_tokens,
-        ["format-newlines", "--output", final_output],
+        stage_entry("translate-md", *translate_tokens),
+        stage_entry("format-newlines", "--output", final_output),
     ]
 
 
-def build_combine_file_list_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_combine_file_list_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     file_list_path = scenario.artifact_path(slug, "file_list", ".txt")
     final_output = scenario.artifact_path(slug, "final")
-    return [["combine", "--file-list", file_list_path, "--output", final_output]]
+    return [stage_entry("combine", "--file-list", file_list_path, "--output", final_output)]
 
 
-def build_batch_format_combine_segments(scenario: "ManagerScenario", slug: str) -> List[List[object]]:
+def build_batch_format_combine_segments(scenario: "ManagerScenario", slug: str) -> List[StagePayload]:
     return build_format_combine_segments(scenario, slug)
 
 
@@ -160,18 +167,11 @@ class ManagerScenario:
     def markers(self) -> Sequence[str]:
         return self.expect_markers if self.expect_markers is not None else MARKERS
 
-    def build_payload(self, slug: str) -> dict[str, object]:
-        segments = self.plan_builder(self, slug)
-        tokens: List[str] = []
-        for segment in segments:
-            if not segment:
-                raise ValueError("Stage definition segments must not be empty.")
-            tokens.append("=")
-            tokens.extend(str(token) for token in segment)
-        return {
-            "input": str(INPUT_PATH),
-            "stages": tokens,
-        }
+    def build_payload(self, slug: str) -> PipelinePayload:
+        stages = self.plan_builder(self, slug)
+        if not stages:
+            raise ValueError("Scenario produced no stages.")
+        return PipelinePayload(input_path=INPUT_PATH, stages=tuple(stages))
 
 
 SCENARIOS: list[ManagerScenario] = [
@@ -263,12 +263,12 @@ def validate_scenario(
     return True, "pipeline activity completed successfully"
 
 
-def build_definitions(manager: ToolManager, payloads: Sequence[dict[str, object]]) -> List[PipelineDefinition]:
+def build_definitions(manager: ToolManager, payloads: Sequence[PipelinePayload]) -> List[PipelineDefinition]:
     return [manager.build_definition_from_payload(payload) for payload in payloads]
 
 
 def run_scenario(manager: ToolManager, scenario: ManagerScenario) -> tuple[bool, str]:
-    payloads: list[dict[str, object]] = []
+    payloads: list[PipelinePayload] = []
     definitions: list[PipelineDefinition] = []
     slugs: list[str] = []
 

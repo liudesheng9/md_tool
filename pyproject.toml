@@ -7,6 +7,7 @@ name = "md-tools"
 version = "0.4.0"
 description = "Markdown utility commands for splitting files and normalising paragraph spacing"
 requires-python = ">=3.8"
+dependencies = ["textual>=0.45.0"]
 authors = [{ name = "md_parse user" }]
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,4 +23,3 @@ md-tool = "md_tools.cli:cli"
 
 [tool.setuptools.packages.find]
 include = ["md_tools", "md_tools.*"]
-

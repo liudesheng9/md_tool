@@ -4,11 +4,10 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from .types import MarkdownArtifact, PipelineStageError
 
-StageToken = Union[str, int, float, Path]
 StageFunc = Callable[[argparse.Namespace, MarkdownArtifact], MarkdownArtifact]
 
 
@@ -17,15 +16,6 @@ class PipelineOutputSpec:
 
     def resolve(self, _args: argparse.Namespace) -> Tuple[Path, ...]:
         return ()
-
-
-@dataclass(frozen=True)
-class StagePlan:
-    tokens: Tuple[StageToken, ...]
-
-    def __post_init__(self) -> None:
-        if not self.tokens:
-            raise ValueError("StagePlan requires at least one token.")
 
 
 @dataclass(frozen=True)
@@ -248,33 +238,3 @@ def run_pipeline(pipeline_definition: PipelineDefinition) -> MarkdownArtifact:
 
     return artifact or MarkdownArtifact([])
 
-
-def build_pipeline_definition_from_stage_plans(
-    stage_plans: Sequence[StagePlan],
-    parser_factory: Callable[[], argparse.ArgumentParser],
-    *,
-    input_path: Path,
-) -> PipelineDefinition:
-    if not stage_plans:
-        raise ValueError("At least one StagePlan must be provided.")
-
-    raw_tokens: List[str] = []
-    for index, plan in enumerate(stage_plans):
-        if index != 0:
-            raw_tokens.append("=")
-        raw_tokens.extend(_stringify_stage_tokens(plan.tokens))
-
-    return build_pipeline_definition(raw_tokens, parser_factory, input_path=input_path)
-
-
-def _stringify_stage_tokens(tokens: Iterable[StageToken]) -> List[str]:
-    result: List[str] = []
-    for token in tokens:
-        if isinstance(token, Path):
-            value = str(token)
-        else:
-            value = str(token)
-        if not value:
-            raise ValueError("Pipeline tokens must be non-empty strings.")
-        result.append(value)
-    return result

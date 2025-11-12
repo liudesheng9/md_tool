@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List
 
 from .manpage import print_man_page
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         executor=execute_pipeline,
     )
     pipeline_command.register(subparsers)
+    _register_tui(subparsers)
     _register_man(subparsers)
 
     return parser
@@ -63,4 +65,25 @@ def _register_man(subparsers) -> None:
 
 def _run_man_command(_args) -> int:
     print_man_page(stream=sys.stdout)
+    return 0
+
+
+def _register_tui(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "tui",
+        help="Launch the interactive TUI pipeline builder.",
+    )
+    parser.add_argument(
+        "root",
+        type=Path,
+        help="Root directory containing Markdown files to process.",
+    )
+    parser.set_defaults(func=_run_tui_command)
+
+
+def _run_tui_command(args) -> int:
+    from .tui import ToolManagerApp
+
+    app = ToolManagerApp(root=args.root)
+    app.run()
     return 0

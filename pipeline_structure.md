@@ -20,15 +20,15 @@ user command
 ### 2. JSON Payload Path (ToolManager)
 
 ```
-JSON payload(s)
+PipelinePayload dataclasses (mirroring JSON schema)
   └── ToolManager.run_payloads()
         └── ToolManager.build_definition_from_payload()
               └── build_pipeline_definition()
                     └── run_pipeline()
 ```
 
-1. Each payload mirrors the CLI schema: `{ "input": "/path/file.md", "stages": ["=", "format-newlines", "=", "split", "2", "-o", "...", ...] }`. The `stages` array is exactly the token stream produced on the command line (including literal `=` separators and options/values).
-2. `ToolManager.run_payloads` converts the list of payloads into `PipelineDefinition` objects by calling `build_definition_from_payload`, which simply feeds the provided token list into `build_pipeline_definition` together with the declared input path.
+1. Each `PipelinePayload` mirrors the CLI schema: it contains an `input` path and a list of `StagePayload` records like `{"stage_name": "split", "args": ["5", "-o", "out.md"]}`. This matches the output from `build_parser` (command name plus the exact CLI arguments).
+2. `ToolManager.run_payloads` converts the payloads into `PipelineDefinition` objects by calling `build_pipeline_definition_from_payload`, which flattens each stage entry into the CLI token list (`= stage args...`) and feeds it into `build_pipeline_definition` with the declared input path.
 3. The resulting definitions are executed in order via the same `run_pipeline` routine used by the CLI path, so stage parsing, capability enforcement, and output tracking behave identically.
 
 ### Shared Components

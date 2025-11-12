@@ -1,6 +1,7 @@
 /build
 /md_tools.egg-info
 test/FCFS.md
+test/test_folder/*
 AGENTS.md
 *.pyc
 md_tools/__pycache__/*

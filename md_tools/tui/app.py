@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static, Switch
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static
 
 try:  # Textual 0.60+ provides TextLog; fall back for older releases.
     from textual.widgets import TextLog  # type: ignore
@@ -29,6 +29,15 @@ except ImportError:  # pragma: no cover - compatibility shim
                 return
             self.mount(Static(line, classes="log-line"))
 
+try:
+    from textual.widgets import Rule  # type: ignore
+except ImportError:  # pragma: no cover - compatibility shim
+    class Rule(Static):
+        """Fallback horizontal rule."""
+
+        def __init__(self, *, classes: str | None = None) -> None:
+            super().__init__("─" * 40, classes=classes)
+
 from ..tool_manager import PipelinePayload, StagePayload, ToolManager
 from ..tools import iter_tool_specs
 
@@ -43,6 +52,8 @@ Screen {
     width: 100%;
     border: round $accent;
     background: $surface;
+    layout: vertical;
+    align-vertical: top;
 }
 
 .step-title {
@@ -85,6 +96,49 @@ Screen {
     margin-bottom: 1;
     border: round $accent;
     padding: 1;
+    background: $boost;
+}
+
+.output-field-header {
+    layout: horizontal;
+    align-horizontal: left;
+    align-vertical: middle;
+    width: 100%;
+}
+
+.output-field-spacer {
+    width: 1fr;
+}
+
+.output-columns {
+    height: 1fr;
+    min-height: 20;
+}
+
+.output-columns > .input-column,
+.output-columns > .output-column {
+    height: 1fr;
+}
+
+.step-actions {
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $accent;
+    align-horizontal: right;
+}
+
+.step-error {
+    color: $error;
+    min-height: 1;
+}
+
+.output-status {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+.output-field-disabled {
+    opacity: 0.75;
 }
 
 """
@@ -127,6 +181,7 @@ class ToolManagerApp(App):
         self.output_overrides: dict[Path, dict[int, str]] = {}
         self.output_manual_overrides: dict[Path, set[int]] = {}
         self.output_disabled: dict[Path, set[int]] = {}
+        self.output_toggle_manual: dict[Path, set[int]] = {}
         self.tool_manager = ToolManager()
         self.tool_names = sorted(spec.tool.name for spec in iter_tool_specs())
 
@@ -135,10 +190,11 @@ class ToolManagerApp(App):
 
     # ---- State management helpers ------------------------------------------------
     def set_selected_files(self, files: list[Path]) -> None:
-        self.selected_files = files
+        self.selected_files = [Path(path).resolve() for path in files]
         self.output_overrides = {}
         self.output_manual_overrides = {}
         self.output_disabled = {}
+        self.output_toggle_manual = {}
 
     def add_stage(self, name: str, args: list[str]) -> None:
         self.pipeline.append(PipelineStageModel(name=name, args=args))
@@ -170,18 +226,34 @@ class ToolManagerApp(App):
             for path, indices in self.output_disabled.items()
             if path in self.selected_files
         }
+        self.output_toggle_manual = {
+            path: {idx for idx in indices if idx in valid_indices}
+            for path, indices in self.output_toggle_manual.items()
+            if path in self.selected_files
+        }
         for file_path in self.selected_files:
             mapping = self.output_overrides.setdefault(file_path, {})
             manual = self.output_manual_overrides.setdefault(file_path, set())
             disabled = self.output_disabled.setdefault(file_path, set())
+            toggle_manual = self.output_toggle_manual.setdefault(file_path, set())
             for idx in valid_indices:
                 default_value = self._default_output_path(file_path, idx)
                 if idx in manual:
                     mapping.setdefault(idx, default_value)
                 else:
                     mapping[idx] = default_value
-                if idx == len(self.pipeline) - 1 and idx in disabled:
-                    disabled.remove(idx)
+                is_final_stage = idx == len(self.pipeline) - 1
+                allow_disable = not is_final_stage and self.pipeline[idx].name in OUTPUT_FLAG_MAP
+                if is_final_stage:
+                    disabled.discard(idx)
+                    toggle_manual.discard(idx)
+                    continue
+                if not allow_disable:
+                    disabled.discard(idx)
+                    toggle_manual.discard(idx)
+                    continue
+                if idx not in toggle_manual:
+                    disabled.add(idx)
 
     def _default_output_path(self, file_path: Path, stage_index: int) -> str:
         suffix = file_path.suffix or ".md"
@@ -200,13 +272,16 @@ class ToolManagerApp(App):
 
     def update_output_disabled(self, file_path: Path, stage_index: int, disabled: bool) -> None:
         mapping = self.output_disabled.setdefault(file_path, set())
+        manual_toggles = self.output_toggle_manual.setdefault(file_path, set())
         if stage_index == len(self.pipeline) - 1:
             mapping.discard(stage_index)
+            manual_toggles.discard(stage_index)
             return
         if disabled:
             mapping.add(stage_index)
         else:
             mapping.discard(stage_index)
+        manual_toggles.add(stage_index)
 
     def stage_requires_output(self, stage_index: int) -> bool:
         if not (0 <= stage_index < len(self.pipeline)):
@@ -338,6 +413,7 @@ class StepTwoScreen(Screen):
                     Static("Pipeline"),
                     ListView(id="pipeline-list", classes="panel"),
                     Static("", id="pipeline-graph", classes="pipeline-graph"),
+                    Static("", id="step2-error", classes="step-error"),
                     Horizontal(
                         Button("Remove Selected", id="remove-stage"),
                         Button("Next", id="next-step2", variant="primary"),
@@ -383,10 +459,16 @@ class StepTwoScreen(Screen):
             self.app.bell()
             return
         args_field = self.query_one("#tool-args", Input)
-        args = shlex.split(args_field.value.strip()) if args_field.value.strip() else []
+        args_value = args_field.value.strip()
+        args = shlex.split(args_value) if args_value else []
+        if self._args_include_output(args):
+            self._set_error("Remove -o/--output flags here. Configure outputs in Step 3.")
+            self.app.bell()
+            return
         app.add_stage(tool_name, args)
         args_field.value = ""
         self.refresh_pipeline_view()
+        self._set_error("")
 
     @on(Button.Pressed, "#remove-stage")
     def handle_remove_stage(self) -> None:
@@ -406,11 +488,16 @@ class StepTwoScreen(Screen):
             return
         app.remove_stage(stage_index)
         self.refresh_pipeline_view()
+        self._set_error("")
 
     @on(Button.Pressed, "#next-step2")
     def handle_next(self) -> None:
         app: ToolManagerApp = self.app  # type: ignore[assignment]
+        self._set_error("")
         if not app.pipeline:
+            self.app.bell()
+            return
+        if not self._validate_pipeline_outputs(app):
             self.app.bell()
             return
         app.ensure_output_defaults()
@@ -419,6 +506,31 @@ class StepTwoScreen(Screen):
     @on(Button.Pressed, "#back-step2")
     def handle_back(self) -> None:
         self.app.pop_screen()
+
+    def _set_error(self, message: str) -> None:
+        error_label = self.query_one("#step2-error", Static)
+        error_label.update(message)
+
+    def _validate_pipeline_outputs(self, app: ToolManagerApp) -> bool:
+        for stage in app.pipeline:
+            if self._args_include_output(stage.args):
+                self._set_error(
+                    f"Stage '{stage.name}' cannot include -o/--output here. Configure outputs in Step 3."
+                )
+                return False
+        self._set_error("")
+        return True
+
+    @staticmethod
+    def _args_include_output(args: list[str]) -> bool:
+        for arg in args:
+            normalized = arg.strip()
+            normalized_lower = normalized.lower()
+            if normalized_lower in ("-o", "--output"):
+                return True
+            if normalized_lower.startswith("--output=") or normalized_lower.startswith("-o="):
+                return True
+        return False
 
 
 class OutputField(Static):
@@ -452,26 +564,32 @@ class OutputField(Static):
         self.allow_disable = allow_disable
         self.enabled = enabled
         self._input_id = f"output-{self.stage_index}"
-        self._switch_id = f"output-toggle-{self.stage_index}"
+        self._toggle_button_id = f"output-toggle-{self.stage_index}"
         self._body_id = f"output-body-{self.stage_index}"
+        self._status_id = f"output-status-{self.stage_index}"
 
     def compose(self) -> ComposeResult:
         label = Label(f"{self.stage_index + 1}. {self.stage_name}")
         if self.allow_disable:
             yield Horizontal(
                 label,
-                Static("Emit output"),
-                Switch(
-                    value=self.enabled,
-                    id=self._switch_id,
+                Static("", classes="output-field-spacer"),
+                Button(
+                    self._toggle_label(),
+                    id=self._toggle_button_id,
+                    variant="primary" if not self.enabled else "default",
                 ),
+                classes="output-field-header",
             )
         else:
-            yield label
+            yield Horizontal(label, classes="output-field-header")
         yield Vertical(id=self._body_id)
+        yield Static("", id=self._status_id, classes="output-status")
+        yield Rule()
 
     def on_mount(self) -> None:
         self._render_body()
+        self._update_state_feedback()
 
     def _render_body(self) -> None:
         body = self.query_one(f"#{self._body_id}", Vertical)
@@ -485,8 +603,7 @@ class OutputField(Static):
                 )
             )
             return
-        input_widget = Input(value=self.value, id=self._input_id)
-        body.mount(input_widget)
+        body.mount(Input(value=self.value, id=self._input_id))
 
     def _active_input(self) -> Input | None:
         if self.allow_disable and not self.enabled:
@@ -496,23 +613,59 @@ class OutputField(Static):
         except Exception:
             return None
 
+    def _status_text(self) -> str:
+        if not self.allow_disable:
+            return f"Final output path: {self.value}"
+        if self.enabled:
+            return f"Intermediate output enabled -> {self.value}"
+        return "Intermediate output disabled."
+
+    def _update_status(self) -> None:
+        try:
+            status = self.query_one(f"#{self._status_id}", Static)
+        except Exception:
+            return
+        status.update(self._status_text())
+
+    def _toggle_button(self) -> Button | None:
+        if not self.allow_disable:
+            return None
+        try:
+            return self.query_one(f"#{self._toggle_button_id}", Button)
+        except Exception:
+            return None
+
+    def _toggle_label(self) -> str:
+        return "Disable output" if self.enabled else "Emit output"
+
+    def _update_state_feedback(self) -> None:
+        self.set_class(self.allow_disable and not self.enabled, "output-field-disabled")
+        self._update_status()
+        button = self._toggle_button()
+        if button is not None:
+            button.label = self._toggle_label()
+            button.variant = "default" if self.enabled else "primary"
+
     @on(Input.Changed)
     def handle_change(self, event: Input.Changed) -> None:
         if self.allow_disable and not self.enabled:
             return
         self.value = event.value
         self.post_message(OutputField.Changed(self, self.stage_index, event.value))
+        self._update_status()
 
-    @on(Switch.Changed)
-    def handle_toggle(self, event: Switch.Changed) -> None:
-        if not self.allow_disable or event.switch.id != self._switch_id:
+    @on(Button.Pressed)
+    def handle_toggle(self, event: Button.Pressed) -> None:
+        if not self.allow_disable or event.button.id != self._toggle_button_id:
             return
-        self.enabled = bool(event.value)
+        self.enabled = not self.enabled
         self._render_body()
         input_widget = self._active_input()
         if input_widget is not None:
             input_widget.value = self.value
+            input_widget.focus()
         self.post_message(OutputField.Toggled(self, self.stage_index, self.enabled))
+        self._update_state_feedback()
 
 
 class StepThreeScreen(Screen):
@@ -526,9 +679,9 @@ class StepThreeScreen(Screen):
         app: ToolManagerApp = self.app  # type: ignore[assignment]
         yield Header()
         yield Vertical(
-            Static("Step 3/4 – Configure output paths", classes="step-title"),
+            Static("Step 3/4 - Configure output paths", classes="step-title"),
             Static(
-                "Only tools that emit intermediate outputs need overrides. Final output is always required.",
+                "Intermediate stages start disabled. Use the Emit output button to opt in; the final output is always required.",
                 classes="step-help",
             ),
             Horizontal(
@@ -536,16 +689,20 @@ class StepThreeScreen(Screen):
                     Static("Inputs"),
                     self._build_output_file_list(app),
                     id="output-file-column",
+                    classes="input-column",
                 ),
                 Vertical(
                     Static("Outputs"),
                     VerticalScroll(id="output-editor", classes="panel"),
                     id="output-path-column",
+                    classes="output-column",
                 ),
+                classes="output-columns",
             ),
             Horizontal(
                 Button("Run Pipelines", id="run-pipelines", variant="primary"),
                 Button("Back", id="back-step3"),
+                classes="step-actions",
             ),
             id="step-container",
         )
@@ -557,9 +714,11 @@ class StepThreeScreen(Screen):
         file_list = self.query_one("#output-file-list", ListView)
         if file_list.children:
             first = file_list.children[0]
-            self.current_file = Path(str(getattr(first, "data", "")))
-            file_list.index = 0
-            self.refresh_output_fields()
+            data = getattr(first, "data", "")
+            if data:
+                self.current_file = Path(str(data)).resolve()
+                file_list.index = 0
+                self.refresh_output_fields()
 
     def refresh_output_fields(self) -> None:
         if not self.current_file:
@@ -569,7 +728,7 @@ class StepThreeScreen(Screen):
         for child in list(editor.children):
             child.remove()
         overrides = app.output_overrides.get(self.current_file, {})
-        disabled = app.output_disabled.get(self.current_file, set())
+        disabled = app.output_disabled.setdefault(self.current_file, set())
         for idx in app.configurable_stage_indices():
             stage = app.pipeline[idx]
             allow_disable = idx != len(app.pipeline) - 1 and stage.name in OUTPUT_FLAG_MAP
@@ -598,7 +757,7 @@ class StepThreeScreen(Screen):
     def on_file_selected(self, event: ListView.Highlighted) -> None:
         data = event.item.data
         if data:
-            self.current_file = Path(str(data))
+            self.current_file = Path(str(data)).resolve()
             self.refresh_output_fields()
 
     @on(OutputField.Changed)

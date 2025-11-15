@@ -26,8 +26,12 @@ except ImportError:  # pragma: no cover - compatibility shim
 
         def write(self, line: str) -> None:
             if not line:
-                return
+                line = ""
             self.mount(Static(line, classes="log-line"))
+
+        def clear(self) -> None:
+            for child in list(self.children):
+                child.remove()
 
 try:
     from textual.widgets import Rule  # type: ignore
@@ -343,14 +347,19 @@ class StepOneScreen(Screen):
         self.temp_selected = set(app.selected_files)
         self.refresh_file_list()
 
+    def _label_for_path(self, path: Path) -> str:
+        app: ToolManagerApp = self.app  # type: ignore[assignment]
+        marker = "[x]" if path in self.temp_selected else "[ ]"
+        relative = path.relative_to(app.root) if path.is_relative_to(app.root) else path
+        return f"{marker} {relative}"
+
     def refresh_file_list(self) -> None:
         app: ToolManagerApp = self.app  # type: ignore[assignment]
         list_view = self.query_one("#file-list", ListView)
         for child in list(list_view.children):
             child.remove()
         for index, path in enumerate(app.available_files):
-            marker = "[x]" if path in self.temp_selected else "[ ]"
-            label = Static(f"{marker} {path.relative_to(app.root)}", markup=False)
+            label = Static(self._label_for_path(path), markup=False)
             item = ListItem(label)
             item.data = str(path)
             list_view.append(item)
@@ -380,7 +389,14 @@ class StepOneScreen(Screen):
             self.temp_selected.remove(path)
         else:
             self.temp_selected.add(path)
-        self.refresh_file_list()
+        self._update_item_marker(event.item, path)
+
+    def _update_item_marker(self, item: ListItem, path: Path) -> None:
+        try:
+            label = item.query_one(Static)
+        except Exception:  # pragma: no cover - Textual internals
+            return
+        label.update(self._label_for_path(path))
 
 
 class StepTwoScreen(Screen):
@@ -837,8 +853,12 @@ class StepFourScreen(Screen):
         super().__init__()
         self.message = initial_message
         self._complete = False
-        self._pending_lines: list[str] = [initial_message] if initial_message else []
-        self._partial_line = ""
+        self._log_lines: list[str] = [initial_message] if initial_message else []
+        self._current_line = ""
+        self._rewrite_line = ""
+        self._rewrite_visible = False
+        self._in_rewrite = False
+        self._pending_cr = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -861,41 +881,105 @@ class StepFourScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._drain_pending_lines()
+        self._render_log()
         finish_btn = self.query_one("#finish-step4", Button)
         finish_btn.disabled = not self._complete
 
     def append_log(self, text: str) -> None:
         if not text:
             return
-        buffer = f"{self._partial_line}{text}"
-        parts = buffer.splitlines(keepends=True)
-        self._partial_line = ""
-        for part in parts:
-            if part.endswith(("\n", "\r")):
-                self._emit_line(part.rstrip("\r\n"))
+        for char in text:
+            if self._pending_cr:
+                if char == "\n":
+                    self._handle_newline()
+                    self._pending_cr = False
+                    continue
+                self._start_rewrite()
+                self._pending_cr = False
+            if char == "\r":
+                self._pending_cr = True
+                continue
+            if char == "\n":
+                self._handle_newline()
+                continue
+            if self._in_rewrite:
+                self._rewrite_line += char
             else:
-                self._partial_line += part
+                self._current_line += char
+        if self._in_rewrite and self._rewrite_line:
+            self._commit_rewrite_line(final=False)
 
     def flush_pending_log(self) -> None:
-        if self._partial_line:
-            self._emit_line(self._partial_line)
-            self._partial_line = ""
+        if self._pending_cr:
+            # Wait to see if a newline arrives in the future; nothing to flush yet.
+            pass
+        if self._in_rewrite and self._rewrite_line:
+            self._commit_rewrite_line(final=False)
+        if self._current_line:
+            self._commit_current_line()
 
-    def _emit_line(self, line: str) -> None:
-        if self.is_mounted:
-            log = self.query_one("#run-log", TextLog)
-            log.write(line)
+    def _write_line(self, line: str, *, replace: bool = False) -> None:
+        if replace and self._log_lines:
+            self._log_lines[-1] = line
         else:
-            self._pending_lines.append(line)
-
-    def _drain_pending_lines(self) -> None:
-        if not self._pending_lines:
+            self._log_lines.append(line)
+        if not self.is_mounted:
             return
         log = self.query_one("#run-log", TextLog)
-        for line in self._pending_lines:
+        if replace:
+            if hasattr(log, "clear"):
+                log.clear()
+            else:  # pragma: no cover - defensive fallback
+                for child in list(log.children):
+                    child.remove()
+            for existing in self._log_lines:
+                log.write(existing)
+        else:
             log.write(line)
-        self._pending_lines.clear()
+
+    def _render_log(self) -> None:
+        log = self.query_one("#run-log", TextLog)
+        if hasattr(log, "clear"):
+            log.clear()
+        else:  # pragma: no cover - defensive fallback
+            for child in list(log.children):
+                child.remove()
+        for line in self._log_lines:
+            log.write(line)
+
+    def _start_rewrite(self) -> None:
+        if self._in_rewrite and self._rewrite_line:
+            self._commit_rewrite_line(final=False)
+        self._in_rewrite = True
+        self._rewrite_line = ""
+        self._current_line = ""
+
+    def _handle_newline(self) -> None:
+        if self._in_rewrite:
+            self._commit_rewrite_line(final=True)
+        else:
+            self._commit_current_line(force=True)
+
+    def _commit_rewrite_line(self, *, final: bool) -> None:
+        if not self._rewrite_line:
+            # No text recorded; still need to clear rewrite state on newline.
+            if final:
+                self._in_rewrite = False
+                self._rewrite_visible = False
+            return
+        self._write_line(self._rewrite_line, replace=self._rewrite_visible)
+        self._rewrite_line = ""
+        if final:
+            self._in_rewrite = False
+            self._rewrite_visible = False
+        else:
+            self._rewrite_visible = True
+
+    def _commit_current_line(self, *, force: bool = False) -> None:
+        if not self._current_line and not force:
+            return
+        self._write_line(self._current_line, replace=False)
+        self._current_line = ""
 
     def mark_complete(self, message: str) -> None:
         self.message = message

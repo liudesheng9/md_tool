@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from ...paragraphs import collect_paragraphs
 from ...pipeline.types import MarkdownArtifact, MarkdownDocument, PipelineStageError
 from ...pipeline.stage_runner import PipelineStageRunner
-from ...utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
+from ...utils import detect_newline, normalise_paragraph_newlines
 
 
 def _load_document(args, stage_name: str) -> Tuple[MarkdownDocument, Optional[Path]]:

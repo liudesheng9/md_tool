@@ -948,6 +948,8 @@ class StepFourScreen(Screen):
             log.write(line)
 
     def _start_rewrite(self) -> None:
+        if self._current_line:
+            self._commit_current_line()
         if self._in_rewrite and self._rewrite_line:
             self._commit_rewrite_line(final=False)
         self._in_rewrite = True

@@ -4,10 +4,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from ..paragraphs import collect_paragraphs
 from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
-from ..utils import collect_paragraphs, detect_newline, normalise_paragraph_newlines
+from ..utils import detect_newline, normalise_paragraph_newlines
 
 
 class SplitTool(MDTool):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from ..paragraphs import collect_paragraphs_with_metadata
 from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
@@ -81,34 +82,46 @@ class FormatNewlinesTool(MDTool):
         if not text:
             return text
 
-        result: list[str] = []
-        i = 0
-        step = len(newline)
-        text_len = len(text)
+        _, metadata = collect_paragraphs_with_metadata(text, newline=newline)
+        if not metadata:
+            return text
 
-        while i < text_len:
-            if text.startswith(newline, i):
-                count = 1
-                while text.startswith(newline, i + count * step):
-                    count += 1
+        result_parts: list[str] = []
+        pending_blank = ""
+        previous_content = False
 
-                has_prev = i > 0
-                has_next = i + count * step < text_len
-                prev_is_newline = i >= step and text.startswith(newline, i - step)
-                next_is_newline = text.startswith(newline, i + count * step)
+        def flush_pending(force_double: bool) -> None:
+            nonlocal pending_blank
+            if not pending_blank:
+                return
+            newline_count = pending_blank.count(newline)
+            if force_double and newline_count <= 1:
+                prefix = pending_blank[:-len(newline)] if newline_count else pending_blank
+                result_parts.append(prefix)
+                result_parts.append(newline * 2)
+            else:
+                result_parts.append(pending_blank)
+            pending_blank = ""
 
-                if count == 1 and has_prev and has_next and not prev_is_newline and not next_is_newline:
-                    result.append(newline * 2)
-                else:
-                    result.append(newline * count)
-
-                i += count * step
+        for entry in metadata:
+            entry_type = entry["type"]
+            entry_text = newline.join(entry["lines"])
+            if entry_type == "blank":
+                pending_blank += entry_text + newline
                 continue
+            if previous_content:
+                flush_pending(force_double=True)
+            else:
+                flush_pending(force_double=False)
+            result_parts.append(entry_text)
+            previous_content = True
 
-            result.append(text[i])
-            i += 1
+        flush_pending(force_double=False)
 
-        return "".join(result)
+        formatted = "".join(result_parts)
+        if text.endswith(newline) and not formatted.endswith(newline):
+            formatted += newline
+        return formatted
 
 
 tool = FormatNewlinesTool()

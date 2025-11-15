@@ -9,6 +9,16 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Dict, Any
 import json
 
+from ..paragraphs import (
+    collect_paragraphs_with_metadata,
+    count_equation_delimiters,
+    is_equation_single_line,
+    is_html_block_end,
+    is_html_block_start,
+    is_image_line,
+    is_reference_definition,
+    is_table_line,
+)
 from ..pipeline.core import PipelineOutputSpec
 from ..tools.base import MDTool
 from ..tools import register_tool
@@ -265,196 +275,6 @@ def _normalise_paragraph(paragraph: str) -> str:
     return paragraph.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _is_table_line(stripped: str) -> bool:
-    if not stripped:
-        return False
-    if stripped.startswith("|"):
-        return True
-    if stripped.startswith("+-") or stripped.startswith("|-"):
-        return True
-    return all(char in "|:+-=_ " for char in stripped) and "|" in stripped
-
-
-def _is_image_line(line: str) -> bool:
-    stripped = line.lstrip()
-    return stripped.startswith("![") and ("](" in stripped or "] [" in stripped)
-
-
-def _is_reference_definition(stripped: str) -> bool:
-    if not stripped.startswith("["):
-        return False
-    closing = stripped.find("]:")
-    return closing != -1
-
-
-def _is_html_block_start(stripped: str) -> bool:
-    if not stripped.startswith("<") or not stripped.endswith(">"):
-        return False
-    if stripped.startswith("</"):
-        return False
-    return True
-
-
-def _is_html_block_end(stripped: str) -> bool:
-    if stripped.startswith("</") and stripped.endswith(">"):
-        return True
-    if stripped.endswith("/>"):
-        return True
-    if stripped.startswith("<!") and stripped.endswith("-->"):
-        return True
-    return False
-
-
-def _count_equation_delimiters(stripped: str) -> int:
-    return stripped.count("$$")
-
-
-def _is_equation_single_line(stripped: str) -> bool:
-    if "$$" not in stripped:
-        return False
-    if stripped == "$$":
-        return False
-    count = _count_equation_delimiters(stripped)
-    return count >= 2 and stripped.startswith("$$") and stripped.endswith("$$")
-
-
-def _collect_paragraphs(text: str, newline: str) -> Tuple[List[str], List[Dict[str, Any]]]:
-    lines = text.split(newline)
-    paragraphs: List[str] = []
-    metadata: List[Dict[str, Any]] = []
-    buffer: List[str] = []
-    state: Optional[str] = None
-    state_start: Optional[int] = None
-    equation_parity = 0
-    i = 0
-
-    def add_paragraph(kind: str, content_lines: List[str], start_idx: int, end_idx: int) -> None:
-        paragraphs.append(newline.join(content_lines))
-        metadata.append(
-            {
-                "type": kind,
-                "lines": content_lines[:],
-                "line_start": start_idx,
-                "line_end": end_idx,
-            }
-        )
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        if state == "equation":
-            buffer.append(line)
-            equation_parity = (equation_parity + _count_equation_delimiters(stripped)) % 2
-            if equation_parity == 0:
-                add_paragraph("equation", buffer, state_start if state_start is not None else i - len(buffer) + 1, i)
-                buffer = []
-                state = None
-                state_start = None
-            i += 1
-            continue
-
-        if state == "html":
-            buffer.append(line)
-            if _is_html_block_end(stripped):
-                add_paragraph("html", buffer, state_start if state_start is not None else i - len(buffer) + 1, i)
-                buffer = []
-                state = None
-                state_start = None
-            i += 1
-            continue
-
-        if state == "table":
-            if _is_table_line(stripped):
-                buffer.append(line)
-                i += 1
-                continue
-            add_paragraph("table", buffer, state_start if state_start is not None else i - len(buffer), i - 1)
-            buffer = []
-            state = None
-            state_start = None
-            continue
-
-        if state == "image":
-            if _is_reference_definition(stripped):
-                buffer.append(line)
-                i += 1
-                continue
-            add_paragraph("image_block", buffer, state_start if state_start is not None else i - len(buffer), i - 1)
-            buffer = []
-            state = None
-            state_start = None
-            continue
-
-        if not stripped:
-            add_paragraph("blank", [line], i, i)
-            i += 1
-            continue
-
-        if _is_image_line(line):
-            buffer = [line]
-            state = "image"
-            state_start = i
-            i += 1
-            continue
-
-        delimiter_count = _count_equation_delimiters(stripped)
-        if delimiter_count:
-            if _is_equation_single_line(stripped):
-                add_paragraph("equation_single", [line], i, i)
-                i += 1
-                continue
-
-            buffer = [line]
-            state = "equation"
-            state_start = i
-            equation_parity = delimiter_count % 2
-            if equation_parity == 0:
-                add_paragraph("equation_single", buffer, state_start, i)
-                buffer = []
-                state = None
-                state_start = None
-            i += 1
-            continue
-
-        if _is_html_block_start(stripped):
-            if "</" in stripped and stripped.count("<") == stripped.count("</") + 1:
-                add_paragraph("html_single", [line], i, i)
-            elif "</" in stripped and stripped.count("</") >= 1 and stripped.count("<") > 1:
-                add_paragraph("html_single", [line], i, i)
-            else:
-                buffer = [line]
-                state = "html"
-                state_start = i
-                if _is_html_block_end(stripped):
-                    add_paragraph("html_single", buffer, state_start, i)
-                    buffer = []
-                    state = None
-                    state_start = None
-            i += 1
-            continue
-
-        if _is_table_line(stripped):
-            buffer = [line]
-            state = "table"
-            state_start = i
-            i += 1
-            continue
-
-        if _is_reference_definition(stripped):
-            add_paragraph("reference", [line], i, i)
-            i += 1
-            continue
-
-        add_paragraph("text", [line], i, i)
-        i += 1
-
-    if state and buffer:
-        add_paragraph(state, buffer, state_start if state_start is not None else len(lines) - len(buffer), len(lines) - 1)
-
-    return paragraphs, metadata
-
-
 class RequestDelayer:
     def __init__(
         self,
@@ -517,44 +337,44 @@ class StructureDetector:
         stripped = line.strip()
 
         if self._equation_open:
-            if _count_equation_delimiters(stripped) % 2 == 1:
+            if count_equation_delimiters(stripped) % 2 == 1:
                 self._equation_open = False
             return False
 
         if self._html_open:
-            if _is_html_block_end(stripped):
+            if is_html_block_end(stripped):
                 self._html_open = False
             return False
 
         if self._in_table:
-            if _is_table_line(stripped):
+            if is_table_line(stripped):
                 return False
             self._in_table = False
 
         if not stripped:
             return True
 
-        delimiter_count = _count_equation_delimiters(stripped)
+        delimiter_count = count_equation_delimiters(stripped)
         if delimiter_count:
-            if _is_equation_single_line(stripped):
+            if is_equation_single_line(stripped):
                 return False
             if delimiter_count % 2 == 1:
                 self._equation_open = True
             return False
 
-        if _is_html_block_start(stripped):
-            if not _is_html_block_end(stripped):
+        if is_html_block_start(stripped):
+            if not is_html_block_end(stripped):
                 self._html_open = True
             return False
 
-        if _is_table_line(stripped):
+        if is_table_line(stripped):
             self._in_table = True
             return False
 
-        if _is_image_line(line):
+        if is_image_line(line):
             return False
 
-        if _is_reference_definition(stripped):
+        if is_reference_definition(stripped):
             return False
 
         return True
@@ -826,7 +646,7 @@ def translate_markdown_document(
     cancel = cancel_token or TranslationCancelToken()
 
     newline = detect_newline(text)
-    paragraphs, paragraph_metadata = _collect_paragraphs(text, newline)
+    paragraphs, paragraph_metadata = collect_paragraphs_with_metadata(text, newline=newline)
 
     if not any(paragraph.strip() for paragraph in paragraphs):
         raise ValueError("The document does not contain any content.")

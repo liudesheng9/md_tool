@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
+from md_tools.format_newlines import FormatNewlinesTool
 from md_tools.paragraphs import collect_paragraphs_with_metadata
 
 
@@ -122,3 +123,60 @@ def test_collect_paragraphs_flushes_trailing_structures() -> None:
 
     table_entry = entries[0]
     assert (table_entry["line_start"], table_entry["line_end"]) == (0, 2)
+
+
+def test_format_newlines_only_adjusts_paragraph_boundaries() -> None:
+    tool = FormatNewlinesTool()
+    text = "\n".join(
+        [
+            "First line within paragraph",
+            "Second line within paragraph",
+            "",
+            "```",
+            "alpha",
+            "",
+            "beta",
+            "```",
+            "",
+            "Final paragraph line",
+            "",
+        ]
+    )
+    formatted = tool.expand_single_newlines(text, "\n")
+
+    assert "First line within paragraph\n\nSecond line within paragraph" in formatted
+    assert "Second line within paragraph\n\n```" in formatted
+    assert "```\nalpha\n\nbeta\n```" in formatted
+    assert "beta\n```\n\nFinal paragraph line" in formatted
+
+
+def test_single_blank_line_between_paragraphs_is_formatted() -> None:
+    text = "\n".join(
+        [
+            "Paragraph one",
+            "",
+            "Paragraph two",
+        ]
+    )
+    _, metadata = collect_paragraphs_with_metadata(text, newline="\n")
+    text_types = [entry for entry in metadata if entry["type"] == "text"]
+    assert len(text_types) == 2
+
+    formatted = FormatNewlinesTool().expand_single_newlines(text, "\n")
+    assert formatted == "Paragraph one\n\nParagraph two"
+
+
+def test_single_newline_between_text_paragraphs_identified() -> None:
+    text = "Paragraph A\nParagraph B"
+    _, metadata = collect_paragraphs_with_metadata(text, newline="\n")
+    assert [entry["type"] for entry in metadata] == ["text", "text"]
+    formatted = FormatNewlinesTool().expand_single_newlines(text, "\n")
+    assert formatted == "Paragraph A\n\nParagraph B"
+
+
+def test_format_newlines_is_idempotent_with_existing_spacing() -> None:
+    tool = FormatNewlinesTool()
+    text = "Alpha\n\nBeta"
+    once = tool.expand_single_newlines(text, "\n")
+    twice = tool.expand_single_newlines(once, "\n")
+    assert once == twice == "Alpha\n\nBeta"

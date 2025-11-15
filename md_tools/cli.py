@@ -5,17 +5,17 @@ import sys
 from pathlib import Path
 from typing import List
 
-from .manpage import print_man_page
-from .pipeline.command import PipelineCommand
-from .pipeline import run_pipeline as execute_pipeline
-from .translate.text import register_parser as register_translate
-from .tools import iter_tool_specs
+from md_tools.manpage import print_man_page
+from md_tools.pipeline.command import PipelineCommand
+from md_tools.pipeline import run_pipeline as execute_pipeline
+from md_tools.translate.text import register_parser as register_translate
+from md_tools.tools import iter_tool_specs
 
 # Ensure tool modules are imported so registration side-effects occur
-from . import combine as _combine_module  # noqa: F401
-from . import format_newlines as _format_module  # noqa: F401
-from . import split as _split_module  # noqa: F401
-from .translate import translate_md as _translate_md_module  # noqa: F401
+from md_tools import combine as _combine_module  # noqa: F401
+from md_tools import format_newlines as _format_module  # noqa: F401
+from md_tools import split as _split_module  # noqa: F401
+from md_tools.translate import translate_md as _translate_md_module  # noqa: F401
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,8 +82,12 @@ def _register_tui(subparsers) -> None:
 
 
 def _run_tui_command(args) -> int:
-    from .tui import ToolManagerApp
+    from md_tools.tui import ToolManagerApp
 
     app = ToolManagerApp(root=args.root)
     app.run()
     return 0
+
+
+if __name__ == "__main__":
+    cli()

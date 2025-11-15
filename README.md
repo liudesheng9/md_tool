@@ -19,6 +19,7 @@ py -m pip install -e .
 - **format-newlines** – normalise paragraph spacing by duplicating isolated blank lines.
 - **translate-md** – translate Markdown paragraph-by-paragraph while preserving tables, equations, and code.
 - **pipeline** – execute any sequence of the above tools without writing intermediate results to disk.
+- **tui** – Textual UI for composing pipelines interactively (`md-tool tui <root>`).
 
 ### Pipeline highlights
 
@@ -63,6 +64,28 @@ md-tool pipeline -i input.md = translate-md --target fr = format-newlines -o fin
 ```
 
 Split a document inside a pipeline while explicitly naming the emitted parts:
+
+### Textual TUI
+
+Prefer a GUI to build pipelines? Launch the Textual interface and point it to a workspace that contains Markdown files:
+
+```powershell
+md-tool tui path\to\workspace
+```
+
+Step 1 selects files, Step 2 builds the pipeline (tools + arguments), Step 3 configures stage outputs, and Step 4 shows live logs with a rerun button if something fails.
+
+### PyInstaller builds
+
+To bundle `md-tool` as a standalone executable:
+
+```powershell
+py -m pip install --upgrade pip
+py -m pip install pyinstaller
+py -m pyinstaller -F -n md-tool md_tools/cli.py
+```
+
+This produces `dist/md-tool`. The CLI entry point now includes an `if __name__ == "__main__": cli()` guard so the binary runs correctly.
 
 ```powershell
 md-tool pipeline -i long.md = split 4 -o parts\long.md

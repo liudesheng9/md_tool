@@ -87,41 +87,41 @@ class FormatNewlinesTool(MDTool):
             return text
 
         result_parts: list[str] = []
-        pending_blank = ""
-        previous_content = False
-
-        def flush_pending(force_double: bool) -> None:
-            nonlocal pending_blank
-            if not pending_blank:
-                return
-            newline_count = pending_blank.count(newline)
-            if force_double and newline_count <= 1:
-                prefix = pending_blank[:-len(newline)] if newline_count else pending_blank
-                result_parts.append(prefix)
-                result_parts.append(newline * 2)
-            else:
-                result_parts.append(pending_blank)
-            pending_blank = ""
+        pending_blank_lines = 0
+        previous_type: str | None = None
 
         for entry in metadata:
             entry_type = entry["type"]
             entry_text = newline.join(entry["lines"])
             if entry_type == "blank":
-                pending_blank += entry_text + newline
+                pending_blank_lines += entry["line_end"] - entry["line_start"] + 1
                 continue
-            if previous_content:
-                flush_pending(force_double=True)
+
+            if result_parts:
+                if pending_blank_lines:
+                    if previous_type == "text" and entry_type == "text":
+                        blank_newlines = max(2, pending_blank_lines + 1)
+                    else:
+                        blank_newlines = pending_blank_lines + 1
+                    result_parts.append(newline * blank_newlines)
+                    pending_blank_lines = 0
+                elif previous_type == "text" and entry_type == "text":
+                    result_parts.append(newline * 2)
+                else:
+                    result_parts.append(newline)
             else:
-                flush_pending(force_double=False)
+                if pending_blank_lines:
+                    result_parts.append(newline * pending_blank_lines)
+                    pending_blank_lines = 0
+
             result_parts.append(entry_text)
-            previous_content = True
+            previous_type = entry_type
+            pending_blank_lines = 0
 
-        flush_pending(force_double=False)
+        if pending_blank_lines:
+            result_parts.append(newline * pending_blank_lines)
 
-        formatted = "".join(result_parts)
-        if text.endswith(newline) and not formatted.endswith(newline):
-            formatted += newline
-        return formatted
+        return "".join(result_parts)
 
 
 tool = FormatNewlinesTool()

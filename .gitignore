@@ -13,5 +13,5 @@ md_tools/translate/__pycache__/*
 md_tools/pipeline/format_newlines/__pycache__/*
 md_tools/pipeline/split/__pycache__/*
 md_tools/tools/__pycache__/*
-dist/*
+/dist
 md-tool.spec
